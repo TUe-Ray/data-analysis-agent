@@ -161,6 +161,25 @@ def build_scripted_model(scenario: str) -> ScriptedRoleModel:
         'and consistent with the supplied data."}'
     )
 
+    if scenario in {
+        "valid-json",
+        "output-repair",
+        "malformed-json",
+        "output-failure",
+    }:
+        return ScriptedRoleModel(
+            {
+                "planner": [repaired_plan],
+                "executor": [
+                    (
+                        "Mean = 13. Sample standard error = 1.291. "
+                        "Number of observations used = 4."
+                    )
+                ],
+                "verifier": [pass_recovery],
+            }
+        )
+
     if scenario == "happy":
         return ScriptedRoleModel(
             {

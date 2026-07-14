@@ -22,7 +22,11 @@ Apply this rubric:
 3. Data support: every result and claim must be supported by the supplied data.
 4. Numerical consistency: counts, means, and sample standard errors must be
    consistent; do not confuse standard deviation with standard error.
-5. Plan alignment: the result must follow the supplied plan.
+5. Plan alignment: the analysis must be consistent with the supplied procedure.
+   Do not require every procedural step to be narrated in the final result unless
+   the user explicitly requests that explanation. A concise result may demonstrate
+   constraint compliance through values that are consistent with the required
+   procedure.
 6. Claim discipline: reject unsupported causal, significance, or trend claims.
 7. Materiality: accept reasonable rounding and concise but complete answers.
 

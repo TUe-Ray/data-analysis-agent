@@ -73,6 +73,23 @@ def test_case_ids_are_unique_and_gold_labels_are_valid() -> None:
     assert sum(case.expected_decision == "REPLAN" for case in cases) >= 2
 
 
+def test_concise_correct_case_does_not_require_method_narration() -> None:
+    cases = load_verifier_cases(CASES_PATH)
+    concise_case = next(
+        case
+        for case in cases
+        if case.case_id == "numerically_correct_but_method_unspecified"
+    )
+
+    assert concise_case.expected_decision == "PASS"
+    assert "missing-value handling" not in concise_case.plan
+
+    imputation_case = next(
+        case for case in cases if case.case_id == "missing_value_imputed"
+    )
+    assert imputation_case.expected_decision == "REPLAN"
+
+
 def test_metric_and_false_rate_calculations() -> None:
     all_cases = load_verifier_cases(CASES_PATH)
     pass_case = all_cases[0]

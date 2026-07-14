@@ -65,14 +65,16 @@ commands that contact the live Nebius API.
 ## Prototype V0
 
 Prototype V0 is a minimal runnable LangGraph skeleton with separate Planner,
-Executor, Verifier, and deterministic Finalize nodes. Each role receives a
-separately constructed context; in particular, the Verifier receives only the
-question, staged input data, current plan, and execution result.
+Executor, Verifier, Final Answer Generator, Output Validator, and Output Repair
+nodes. Each role receives a separately constructed context; in particular, the
+Verifier receives only the question, staged input data, current plan, and
+execution result.
 
-The Verifier returns validated `PASS` or `REPLAN` JSON. A passing result is
-finalized, while `REPLAN` loops to the Planner at most once by default. If the
-limit is exhausted, the graph stops without claiming verification passed. The
-Executor is LLM-based and does not execute generated code.
+The Verifier returns validated `PASS` or `REPLAN` JSON. A passing result moves
+to JSON-only answer generation, while `REPLAN` loops to the Planner at most once
+by default. If the limit is exhausted, the graph returns an explicit
+`stopped_after_max_replans` failure object without claiming verification passed.
+The Executor is LLM-based and does not execute generated code.
 
 Run the deterministic offline scenarios without credentials or network access:
 
@@ -80,6 +82,9 @@ Run the deterministic offline scenarios without credentials or network access:
 make demo-v0-happy
 make demo-v0-replan
 make demo-v0-max-replan
+make demo-v0-valid-json
+make demo-v0-output-repair
+make demo-v0-output-failure
 ```
 
 The replan scenario uses the verifier-trap prompt to demonstrate recovery from
@@ -99,6 +104,51 @@ make demo-v0-live
 Each demo prints separate Planner/Executor/Verifier iterations. Complete model
 messages and raw responses are written under `runs/demo_<timestamp>/`; `runs/`
 is ignored by Git.
+
+### JSON-only final output
+
+Scientific verification and output validation are separate steps:
+
+- The Verifier judges whether the analysis is correct, complete, supported by
+  the data, and compliant with user constraints.
+- Pydantic and the Output Validator check only whether the already approved
+  answer is one JSON object with the required structure and JSON-safe values.
+
+Pydantic validates the structure of the final answer. It does not validate
+scientific correctness.
+
+A successful final answer has this schema:
+
+```json
+{
+  "status": "completed",
+  "answer": "The approved execution result.",
+  "key_results": {
+    "mean": 13.0,
+    "sample_standard_error": 1.291,
+    "n_observations": 4
+  },
+  "limitations": []
+}
+```
+
+`status` may be `completed` or `completed_with_limitations`; `answer` is a
+string, `key_results` is a JSON-safe object, and `limitations` is a list of
+strings. Extra fields and prose outside the JSON object are rejected. The
+deterministic formatter copies the approved execution result and extracts only
+explicitly labeled values; it does not recalculate them or make another
+scientific judgment.
+
+Invalid output is routed once to Output Repair. Repair receives only the invalid
+candidate, its schema error, the required schema, and the approved execution
+result. If the repaired output is still invalid, the workflow ends with
+`output_validation_failed` rather than claiming completion.
+
+Use `make demo-v0-valid-json` for direct validation,
+`make demo-v0-output-repair` for a successful bounded repair, and
+`make demo-v0-output-failure` for safe termination after the repair limit.
+Detailed candidate output, Pydantic errors, repair output, and final validated
+JSON are stored in `runs/demo_<timestamp>/workflow.log`.
 
 ## Verifier Intelligence Evaluation
 
@@ -138,10 +188,10 @@ reduce reliance on an LLM as judge.
 
 ## Current scope
 
-The project currently provides the V0 bounded verification loop, deterministic
-offline examples, a small live Verifier diagnostic suite, environment-based
-configuration, a minimal OpenAI-compatible Nebius client factory, and manual
-live connectivity/demo commands.
+The project currently provides the V0 bounded verification loop, one bounded
+JSON-output repair, deterministic offline examples, a small live Verifier
+diagnostic suite, environment-based configuration, a minimal OpenAI-compatible
+Nebius client factory, and manual live connectivity/demo commands.
 
 ## Not implemented yet
 

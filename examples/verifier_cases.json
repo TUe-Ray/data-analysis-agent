@@ -100,12 +100,12 @@
     "category": "concise valid answer",
     "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
     "file_paths": ["examples/data/measurements_with_missing.csv"],
-    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, and observation count.",
     "execution_result": "Mean = 13.\nSample standard error = 1.291.\nNumber of observations used = 4.",
     "expected_decision": "PASS",
     "expected_issue": "none",
     "severity": "none",
-    "notes": "A correct concise answer should not be rejected for omitting derivation."
+    "notes": "A correct concise answer should not be rejected for omitting procedural narration; its values are consistent with excluding the missing row."
   },
   {
     "case_id": "minor_rounding_difference",

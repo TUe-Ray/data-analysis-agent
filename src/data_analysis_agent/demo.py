@@ -21,6 +21,10 @@ from data_analysis_agent.evaluation import (
     load_verifier_cases,
     run_verifier_evaluation,
 )
+from data_analysis_agent.final_output import (
+    DeterministicFinalOutputProvider,
+    build_scripted_output_provider,
+)
 from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import (
     ModelExchange,
@@ -75,7 +79,14 @@ def _offline_inputs(scenario: str) -> tuple[Path, list[Path]]:
             PROJECT_ROOT / "examples/prompts/happy_path.txt",
             [PROJECT_ROOT / "examples/data/simple_measurements.csv"],
         )
-    if scenario in {"replan", "max-replan"}:
+    if scenario in {
+        "replan",
+        "max-replan",
+        "valid-json",
+        "output-repair",
+        "malformed-json",
+        "output-failure",
+    }:
         return (
             PROJECT_ROOT / "examples/prompts/verifier_trap.txt",
             [PROJECT_ROOT / "examples/data/measurements_with_missing.csv"],
@@ -127,6 +138,25 @@ def _write_workflow_log(
             SUBDIVIDER,
             "Iteration history:",
             json.dumps(result.get("iteration_history", []), indent=2),
+            "Raw final-answer-generator output:",
+            result.get("raw_final_output", "none"),
+            "Pydantic parse result:",
+            json.dumps(
+                result.get("validated_final_answer"), indent=2, ensure_ascii=False
+            ),
+            "Output validation status:",
+            str(result.get("output_validation_status")),
+            "Output validation errors:",
+            result.get("output_validation_error", ""),
+            "Raw repair output:",
+            result.get("raw_repair_output", "none"),
+            "Output validation history:",
+            json.dumps(result.get("output_validation_history", []), indent=2),
+            f"Repair count: {result.get('output_repair_count', 0)}",
+            "Final validated JSON:",
+            json.dumps(
+                result.get("validated_final_answer"), indent=2, ensure_ascii=False
+            ),
             f"Final status: {result['status']}",
             f"Final answer:\n{result['final_answer']}",
         ]
@@ -158,6 +188,7 @@ def run_demo(
         prompt_path = prompt_path or default_prompt
         file_paths = file_paths or default_files
         model = build_scripted_model(scenario)
+        output_provider = build_scripted_output_provider(scenario)
     elif mode == "live":
         if prompt_path is None or not file_paths:
             raise DemoInputError("Live mode requires --prompt and at least one --file")
@@ -166,6 +197,7 @@ def run_demo(
             client=create_nebius_client(settings),
             model=settings.nebius_model,
         )
+        output_provider = DeterministicFinalOutputProvider()
     else:
         raise DemoInputError(f"Unknown demo mode: {mode}")
 
@@ -174,13 +206,16 @@ def run_demo(
     recorder = RecordingRoleModel(model)
     result = cast(
         AgentState,
-        build_graph(recorder).invoke(
+        build_graph(recorder, output_provider).invoke(
             {
                 "question": question,
                 "file_paths": staged_names,
                 "input_context": input_context,
                 "replan_count": 0,
                 "max_replans": max_replans,
+                "output_repair_count": 0,
+                "max_output_repairs": 1,
+                "output_validation_history": [],
                 "trace": [],
                 "iteration_history": [],
             }
@@ -230,6 +265,37 @@ def format_workflow_result(
                 record["route"],
             ]
         )
+    if result.get("raw_final_output") is not None:
+        lines.extend(
+            [
+                "",
+                SUBDIVIDER,
+                "FINAL ANSWER",
+                SUBDIVIDER,
+                "Generator status:",
+                "Produced candidate JSON",
+            ]
+        )
+    for record in result.get("output_validation_history", []):
+        lines.extend(
+            [
+                "",
+                "OUTPUT VALIDATION",
+                f"Attempt {record['attempt']} : {record['status']}",
+            ]
+        )
+        if record["error"]:
+            error_summary = record["error"].splitlines()[0]
+            lines.append(f"Reason : {error_summary}")
+        lines.append(f"Route : {record['route']}")
+        if record["status"] == "INVALID" and record["route"].endswith("Output Repair"):
+            lines.extend(
+                [
+                    "",
+                    "OUTPUT REPAIR",
+                    f"Repair attempt : {result.get('output_repair_count', 0)}",
+                ]
+            )
     lines.extend(
         [
             "",
@@ -239,7 +305,7 @@ def format_workflow_result(
             f"Status       : {result['status']}",
             f"Replan count : {result['replan_count']}",
             "",
-            "Final answer:",
+            "JSON:",
             result["final_answer"],
             "",
             f"Detailed log: {log_path}",
@@ -254,7 +320,15 @@ def build_demo_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("offline", "live"), required=True)
     parser.add_argument(
         "--scenario",
-        choices=("happy", "replan", "max-replan"),
+        choices=(
+            "happy",
+            "replan",
+            "max-replan",
+            "valid-json",
+            "output-repair",
+            "malformed-json",
+            "output-failure",
+        ),
         default="happy",
         help="Scripted scenario used in offline mode",
     )

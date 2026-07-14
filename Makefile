@@ -1,4 +1,4 @@
-.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-live verifier-eval-live verifier-eval-live-3
+.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-valid-json demo-v0-output-repair demo-v0-output-failure demo-v0-live verifier-eval-live verifier-eval-live-3
 
 VENV ?= .venv
 PYTHON ?= $(VENV)/bin/python
@@ -33,6 +33,15 @@ demo-v0-replan:
 
 demo-v0-max-replan:
 	$(PYTHON) -m data_analysis_agent.demo --mode offline --scenario max-replan
+
+demo-v0-valid-json:
+	$(PYTHON) -m data_analysis_agent.demo --mode offline --scenario valid-json
+
+demo-v0-output-repair:
+	$(PYTHON) -m data_analysis_agent.demo --mode offline --scenario output-repair
+
+demo-v0-output-failure:
+	$(PYTHON) -m data_analysis_agent.demo --mode offline --scenario output-failure
 
 demo-v0-live:
 	$(PYTHON) -m data_analysis_agent.demo --mode live \

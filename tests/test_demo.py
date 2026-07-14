@@ -83,7 +83,7 @@ def test_offline_cli_prints_public_graph_state(
         "Route:",
         "FINAL RESULT",
         "Replan count : 0",
-        "Final answer:",
+        "JSON:",
         "Detailed log:",
     ):
         assert label in output
@@ -104,4 +104,49 @@ def test_replan_terminal_output_shows_both_iterations(tmp_path: Path) -> None:
     assert "Decision : REPLAN" in output
     assert "Verifier -> Planner" in output
     assert "Decision : PASS" in output
-    assert "Verifier -> Finalize" in output
+    assert "Verifier -> Final Answer Generator" in output
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_status", "repair_count"),
+    [
+        ("valid-json", "completed", 0),
+        ("output-repair", "completed", 1),
+        ("malformed-json", "completed", 1),
+        ("output-failure", "output_validation_failed", 1),
+    ],
+)
+def test_output_validation_demo_scenarios(
+    scenario: str, expected_status: str, repair_count: int
+) -> None:
+    with (
+        patch("data_analysis_agent.demo.load_settings") as load_settings,
+        patch("data_analysis_agent.demo.create_nebius_client") as create_client,
+    ):
+        result = run_demo(mode="offline", scenario=scenario)
+
+    load_settings.assert_not_called()
+    create_client.assert_not_called()
+    assert result["status"] == expected_status
+    assert result["output_repair_count"] == repair_count
+
+
+def test_output_repair_terminal_is_readable(tmp_path: Path) -> None:
+    result = run_demo(mode="offline", scenario="output-repair")
+
+    output = format_workflow_result(
+        mode="offline",
+        scenario="output-repair",
+        result=result,
+        log_path=tmp_path / "workflow.log",
+    )
+
+    for text in (
+        "FINAL ANSWER",
+        "Attempt 1 : INVALID",
+        "Output Validator -> Output Repair",
+        "Repair attempt : 1",
+        "Attempt 2 : VALID",
+        "Status       : completed",
+    ):
+        assert text in output

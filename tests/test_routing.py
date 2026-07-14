@@ -1,7 +1,11 @@
 import pytest
 from pydantic import ValidationError
 
-from data_analysis_agent.graph import build_graph, route_after_verification
+from data_analysis_agent.graph import (
+    build_graph,
+    route_after_output_validation,
+    route_after_verification,
+)
 from data_analysis_agent.models import ScriptedRoleModel
 from data_analysis_agent.nodes import VerifierOutputError
 from data_analysis_agent.schemas import VerificationOutput
@@ -53,7 +57,10 @@ def test_invalid_verifier_json_fails_after_one_repair_attempt() -> None:
 
 
 def test_router_honors_pass_and_replan_limit() -> None:
-    assert route_after_verification({"verification_decision": "PASS"}) == "finalize"
+    assert (
+        route_after_verification({"verification_decision": "PASS"})
+        == "final_answer_generator"
+    )
     assert (
         route_after_verification(
             {
@@ -72,5 +79,31 @@ def test_router_honors_pass_and_replan_limit() -> None:
                 "max_replans": 1,
             }
         )
-        == "finalize"
+        == "failure_finalizer"
+    )
+
+
+def test_output_router_honors_single_repair_limit() -> None:
+    assert route_after_output_validation({"output_validation_status": "VALID"}) == (
+        "end"
+    )
+    assert (
+        route_after_output_validation(
+            {
+                "output_validation_status": "INVALID",
+                "output_repair_count": 0,
+                "max_output_repairs": 1,
+            }
+        )
+        == "output_repair"
+    )
+    assert (
+        route_after_output_validation(
+            {
+                "output_validation_status": "INVALID",
+                "output_repair_count": 1,
+                "max_output_repairs": 1,
+            }
+        )
+        == "output_failure"
     )
