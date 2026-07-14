@@ -7,8 +7,8 @@ import sys
 
 from openai import APIError, OpenAIError
 
-from scientific_agent.config import ConfigurationError, load_settings
-from scientific_agent.nebius_client import create_nebius_client
+from data_analysis_agent.config import ConfigurationError, load_settings
+from data_analysis_agent.nebius_client import create_nebius_client
 
 
 def main() -> int:

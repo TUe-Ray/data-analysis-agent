@@ -1,9 +1,9 @@
 import importlib
 from unittest.mock import Mock, patch
 
-from scientific_agent import nebius_client
-from scientific_agent.config import Settings
-from scientific_agent.nebius_client import create_nebius_client
+from data_analysis_agent import nebius_client
+from data_analysis_agent.config import Settings
+from data_analysis_agent.nebius_client import create_nebius_client
 
 
 def test_importing_client_module_does_not_construct_a_client() -> None:
@@ -22,7 +22,7 @@ def test_create_nebius_client_uses_settings() -> None:
     )
     client_constructor = Mock()
 
-    with patch("scientific_agent.nebius_client.OpenAI", client_constructor):
+    with patch("data_analysis_agent.nebius_client.OpenAI", client_constructor):
         client = create_nebius_client(settings)
 
     assert client is client_constructor.return_value

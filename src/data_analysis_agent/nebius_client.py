@@ -2,7 +2,7 @@
 
 from openai import OpenAI
 
-from scientific_agent.config import Settings
+from data_analysis_agent.config import Settings
 
 
 def create_nebius_client(settings: Settings) -> OpenAI:

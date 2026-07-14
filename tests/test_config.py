@@ -1,6 +1,6 @@
 import pytest
 
-from scientific_agent.config import (
+from data_analysis_agent.config import (
     DEFAULT_NEBIUS_BASE_URL,
     ConfigurationError,
     load_settings,

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scientific-agent"
+name = "data-analysis-agent"
 version = "0.1.0"
-description = "Initial Nebius Token Factory setup for a life sciences take-home assignment."
+description = "Data analysis agent setup with Nebius Token Factory API connectivity."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

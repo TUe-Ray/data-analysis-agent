@@ -1,8 +1,7 @@
-# Nebius Token Factory project setup
+# Data Analysis Agent
 
-This repository is being prepared for the Nebius ML Engineer – Life Sciences
-take-home assignment. This initial commit establishes only the Python project
-setup and Nebius Token Factory API connectivity.
+This repository contains the initial setup for a data analysis agent. It
+establishes Python project tooling and Nebius Token Factory API connectivity.
 
 ## Prerequisites
 
