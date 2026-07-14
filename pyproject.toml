@@ -9,7 +9,9 @@ description = "Data analysis agent setup with Nebius Token Factory API connectiv
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "langgraph>=0.2.0",
     "openai>=1.0.0",
+    "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
 ]
 

@@ -1,0 +1,3 @@
+Using the supplied CSV, calculate the arithmetic mean of the non-missing
+values, the sample standard error of the mean, and the number of observations
+used. Do not impute missing values. Your answer must include all three items.

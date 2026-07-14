@@ -1,0 +1,98 @@
+from collections import Counter
+
+from data_analysis_agent.graph import build_graph
+from data_analysis_agent.models import ScriptedRoleModel, build_scripted_model
+from data_analysis_agent.state import AgentState
+
+
+def initial_state(*, trap: bool = False) -> AgentState:
+    question = (
+        "Calculate mean, sample standard error, and count."
+        if trap
+        else "Calculate mean and count."
+    )
+    return {
+        "question": question,
+        "file_paths": ["measurements.csv"],
+        "input_context": "File: measurements.csv\nvalue\n10\n12\n14\n16",
+        "replan_count": 0,
+        "max_replans": 1,
+        "trace": [],
+    }
+
+
+def role_counts(model: ScriptedRoleModel) -> Counter[str]:
+    return Counter(call.role for call in model.calls)
+
+
+def test_graph_compiles_successfully() -> None:
+    graph = build_graph(build_scripted_model("happy"))
+
+    assert {"planner", "executor", "verifier", "finalize"}.issubset(
+        graph.get_graph().nodes
+    )
+
+
+def test_happy_path_reaches_finalize_with_pass() -> None:
+    model = build_scripted_model("happy")
+    result = build_graph(model).invoke(initial_state())
+
+    assert result["verification_decision"] == "PASS"
+    assert result["status"] == "completed"
+    assert result["replan_count"] == 0
+    assert result["trace"] == [
+        "planner",
+        "executor",
+        "verifier:PASS",
+        "finalize",
+    ]
+    assert role_counts(model) == {"planner": 1, "executor": 1, "verifier": 1}
+
+
+def test_replan_routes_back_and_recovers() -> None:
+    model = build_scripted_model("replan")
+    result = build_graph(model).invoke(initial_state(trap=True))
+
+    assert result["status"] == "completed"
+    assert result["verification_decision"] == "PASS"
+    assert result["replan_count"] == 1
+    assert result["trace"] == [
+        "planner",
+        "executor",
+        "verifier:REPLAN",
+        "planner",
+        "executor",
+        "verifier:PASS",
+        "finalize",
+    ]
+    assert role_counts(model) == {"planner": 2, "executor": 2, "verifier": 2}
+
+
+def test_max_replan_terminates_without_claiming_pass() -> None:
+    model = build_scripted_model("max-replan")
+    result = build_graph(model).invoke(initial_state(trap=True))
+
+    assert result["status"] == "stopped_after_max_replans"
+    assert result["verification_decision"] == "REPLAN"
+    assert result["replan_count"] == 1
+    assert result["trace"] == [
+        "planner",
+        "executor",
+        "verifier:REPLAN",
+        "planner",
+        "executor",
+        "verifier:REPLAN",
+        "finalize",
+    ]
+    assert "Verification did not pass" in result["final_answer"]
+    assert role_counts(model) == {"planner": 2, "executor": 2, "verifier": 2}
+
+
+def test_trap_recovery_final_answer_contains_all_requested_values() -> None:
+    result = build_graph(build_scripted_model("replan")).invoke(
+        initial_state(trap=True)
+    )
+
+    assert "Mean = 13" in result["final_answer"]
+    assert "Sample standard error = 1.291" in result["final_answer"]
+    assert "Number of observations used = 4" in result["final_answer"]
