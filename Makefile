@@ -1,23 +1,26 @@
 .PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-live verifier-eval-live verifier-eval-live-3
 
-PYTHON ?= python3
+VENV ?= .venv
+PYTHON ?= $(VENV)/bin/python
+RUFF = $(PYTHON) -m ruff
+PYTEST = $(PYTHON) -m pytest
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
 
 format:
-	ruff format .
+	$(RUFF) format .
 
 lint:
-	ruff check .
+	$(RUFF) check .
 
 test:
-	pytest
+	$(PYTEST)
 
 check:
-	ruff format --check .
-	ruff check .
-	pytest
+	$(RUFF) format --check .
+	$(RUFF) check .
+	$(PYTEST)
 
 api-check:
 	$(PYTHON) scripts/check_nebius_api.py
