@@ -1,22 +1,40 @@
-"""Command-line demo for the minimal verification-first LangGraph workflow."""
+"""CLI demos and live Verifier evaluation for Prototype V0."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
 from openai import OpenAIError
 
 from data_analysis_agent.config import ConfigurationError, load_settings
+from data_analysis_agent.evaluation import (
+    DIVIDER,
+    SUBDIVIDER,
+    EvaluationFixtureError,
+    EvaluationOutputError,
+    format_evaluation_summary,
+    load_verifier_cases,
+    run_verifier_evaluation,
+)
 from data_analysis_agent.graph import build_graph
-from data_analysis_agent.models import NebiusRoleModel, RoleModel, build_scripted_model
+from data_analysis_agent.models import (
+    ModelExchange,
+    NebiusRoleModel,
+    RecordingRoleModel,
+    RoleModel,
+    build_scripted_model,
+)
 from data_analysis_agent.nebius_client import create_nebius_client
 from data_analysis_agent.nodes import VerifierOutputError
 from data_analysis_agent.state import AgentState
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs"
 MAX_FILE_BYTES = 50 * 1024
 SUPPORTED_SUFFIXES = {".csv", ".txt"}
 
@@ -65,6 +83,62 @@ def _offline_inputs(scenario: str) -> tuple[Path, list[Path]]:
     raise DemoInputError(f"Unknown offline scenario: {scenario}")
 
 
+def _create_demo_log_path(output_dir: Path) -> Path:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
+    run_directory = output_dir / f"demo_{timestamp}"
+    try:
+        run_directory.mkdir(parents=True, exist_ok=False)
+    except OSError as error:
+        raise DemoInputError(
+            f"Could not create demo output directory {run_directory}: {error}"
+        ) from error
+    return run_directory / "workflow.log"
+
+
+def _write_workflow_log(
+    *, log_path: Path, result: AgentState, exchanges: list[ModelExchange]
+) -> None:
+    lines = [
+        "PROTOTYPE V0 — DETAILED WORKFLOW LOG",
+        f"Timestamp: {datetime.now(UTC).isoformat()}",
+        f"Question:\n{result['question']}",
+        f"Staged files: {', '.join(result['file_paths'])}",
+        f"Staged input context:\n{result['input_context']}",
+        f"Trace: {' -> '.join(result['trace'])}",
+        "",
+    ]
+    for index, exchange in enumerate(exchanges, start=1):
+        lines.extend(
+            [
+                SUBDIVIDER,
+                f"Exchange: {index}",
+                f"Role: {exchange.role}",
+                "Exact messages:",
+                json.dumps(exchange.messages, indent=2, ensure_ascii=False),
+                "Raw response:",
+                exchange.response or "none",
+                f"Latency seconds: {exchange.latency_seconds:.6f}",
+                f"Error: {exchange.error or 'none'}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            SUBDIVIDER,
+            "Iteration history:",
+            json.dumps(result.get("iteration_history", []), indent=2),
+            f"Final status: {result['status']}",
+            f"Final answer:\n{result['final_answer']}",
+        ]
+    )
+    try:
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+    except OSError as error:
+        raise DemoInputError(
+            f"Could not write workflow log {log_path}: {error}"
+        ) from error
+
+
 def run_demo(
     *,
     mode: Literal["offline", "live"],
@@ -72,6 +146,7 @@ def run_demo(
     prompt_path: Path | None = None,
     file_paths: list[Path] | None = None,
     max_replans: int = 1,
+    log_path: Path | None = None,
 ) -> AgentState:
     """Stage inputs and invoke the real graph in offline or live mode."""
     if max_replans < 0:
@@ -96,37 +171,85 @@ def run_demo(
 
     question = _read_small_text_file(prompt_path).strip()
     staged_names, input_context = stage_input_files(file_paths)
-    graph = build_graph(model)
-    result = graph.invoke(
-        {
-            "question": question,
-            "file_paths": staged_names,
-            "input_context": input_context,
-            "replan_count": 0,
-            "max_replans": max_replans,
-            "trace": [],
-        }
+    recorder = RecordingRoleModel(model)
+    result = cast(
+        AgentState,
+        build_graph(recorder).invoke(
+            {
+                "question": question,
+                "file_paths": staged_names,
+                "input_context": input_context,
+                "replan_count": 0,
+                "max_replans": max_replans,
+                "trace": [],
+                "iteration_history": [],
+            }
+        ),
     )
-    return cast(AgentState, result)
+    if log_path is not None:
+        _write_workflow_log(
+            log_path=log_path, result=result, exchanges=recorder.exchanges
+        )
+    return result
 
 
-def print_result(*, mode: str, result: AgentState) -> None:
-    """Print the concise public state produced by a demo run."""
-    print(f"Mode: {mode}")
-    print(f"Question: {result['question']}")
-    print(f"Staged files: {', '.join(result['file_paths'])}")
-    print(f"Plan:\n{result['plan']}")
-    print(f"Execution result: {result['execution_result']}")
-    print(f"Verification decision: {result['verification_decision']}")
-    print(f"Verification feedback: {result['verification_feedback']}")
-    print(f"Replan count: {result['replan_count']}")
-    print(f"Trace: {' -> '.join(result['trace'])}")
-    print(f"Final status: {result['status']}")
-    print(f"Final answer: {result['final_answer']}")
+def format_workflow_result(
+    *, mode: str, scenario: str, result: AgentState, log_path: Path
+) -> str:
+    """Format concise iteration-level output without complete model messages."""
+    demo_name = "LIVE" if mode == "live" else scenario.upper().replace("-", " ")
+    lines = [
+        DIVIDER,
+        f"PROTOTYPE V0 — {demo_name} DEMO",
+        DIVIDER,
+        "",
+        "Question:",
+        result["question"],
+        "",
+        "Staged files:",
+        *[f"- {name}" for name in result["file_paths"]],
+    ]
+    for record in result.get("iteration_history", []):
+        lines.extend(
+            [
+                "",
+                SUBDIVIDER,
+                f"ITERATION {record['iteration']}",
+                SUBDIVIDER,
+                "Plan:",
+                record["plan"],
+                "",
+                "Execution result:",
+                record["execution_result"],
+                "",
+                "Verifier:",
+                f"Decision : {record['verification_decision']}",
+                f"Feedback : {record['verification_feedback']}",
+                "",
+                "Route:",
+                record["route"],
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            DIVIDER,
+            "FINAL RESULT",
+            DIVIDER,
+            f"Status       : {result['status']}",
+            f"Replan count : {result['replan_count']}",
+            "",
+            "Final answer:",
+            result["final_answer"],
+            "",
+            f"Detailed log: {log_path}",
+        ]
+    )
+    return "\n".join(lines)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the Prototype V0 command-line parser."""
+def build_demo_parser() -> argparse.ArgumentParser:
+    """Create the existing workflow-demo command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("offline", "live"), required=True)
     parser.add_argument(
@@ -138,19 +261,74 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt", type=Path)
     parser.add_argument("--file", dest="file_paths", type=Path, action="append")
     parser.add_argument("--max-replans", type=int, default=1)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_RUNS_DIR)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Run the CLI and return a process exit status."""
-    args = build_parser().parse_args(argv)
+def build_evaluation_parser() -> argparse.ArgumentParser:
+    """Create the live Verifier evaluation parser."""
+    parser = argparse.ArgumentParser(
+        prog="python -m data_analysis_agent.demo verifier-eval",
+        description="Run fixed gold cases through only the live Nebius Verifier.",
+    )
+    parser.add_argument(
+        "--cases",
+        type=Path,
+        default=PROJECT_ROOT / "examples/verifier_cases.json",
+    )
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--model")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    return parser
+
+
+def _run_evaluation_command(arguments: list[str]) -> int:
+    args = build_evaluation_parser().parse_args(arguments)
     try:
+        cases = load_verifier_cases(args.cases)
+        settings = load_settings()
+        model_id = args.model or settings.nebius_model
+        model = NebiusRoleModel(
+            client=create_nebius_client(settings),
+            model=model_id,
+            temperature=0,
+        )
+        run = run_verifier_evaluation(
+            cases=cases,
+            cases_path=args.cases,
+            model=model,
+            model_id=model_id,
+            repeats=args.repeats,
+            output_dir=args.output_dir,
+            project_root=PROJECT_ROOT,
+        )
+    except (
+        ConfigurationError,
+        EvaluationFixtureError,
+        EvaluationOutputError,
+    ) as error:
+        print(f"Verifier evaluation failed: {error}", file=sys.stderr)
+        return 1
+    print(format_evaluation_summary(run))
+    return 0 if run.metrics.evaluated_judgments > 0 else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run a workflow demo or the manual live Verifier evaluation."""
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments and arguments[0] == "verifier-eval":
+        return _run_evaluation_command(arguments[1:])
+
+    args = build_demo_parser().parse_args(arguments)
+    try:
+        log_path = _create_demo_log_path(args.output_dir)
         result = run_demo(
             mode=args.mode,
             scenario=args.scenario,
             prompt_path=args.prompt,
             file_paths=args.file_paths,
             max_replans=args.max_replans,
+            log_path=log_path,
         )
     except (
         ConfigurationError,
@@ -161,7 +339,14 @@ def main(argv: list[str] | None = None) -> int:
     ) as error:
         print(f"Demo failed: {error}", file=sys.stderr)
         return 1
-    print_result(mode=args.mode, result=result)
+    print(
+        format_workflow_result(
+            mode=args.mode,
+            scenario=args.scenario,
+            result=result,
+            log_path=log_path,
+        )
+    )
     return 0
 
 

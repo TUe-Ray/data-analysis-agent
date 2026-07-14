@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -24,6 +25,17 @@ class ModelCall:
 
     role: Role
     messages: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class ModelExchange:
+    """One complete model exchange retained by the demo logging layer."""
+
+    role: Role
+    messages: list[dict[str, str]]
+    response: str | None
+    latency_seconds: float
+    error: str | None = None
 
 
 class ScriptedRoleModel:
@@ -54,21 +66,74 @@ class ScriptedRoleModel:
 class NebiusRoleModel:
     """Use one configured Nebius model for each V0 role."""
 
-    def __init__(self, *, client: OpenAI, model: str) -> None:
+    def __init__(
+        self, *, client: OpenAI, model: str, temperature: float | None = None
+    ) -> None:
         self._client = client
         self._model = model
+        self._temperature = temperature
+        self.last_token_usage: dict[str, int] | None = None
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Send a role-specific request through the OpenAI-compatible client."""
         del role
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-        )
+        self.last_token_usage = None
+        if self._temperature is None:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+            )
+        else:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+            )
+        if response.usage is not None:
+            self.last_token_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
         content = response.choices[0].message.content
         if not content:
             raise RuntimeError("Nebius returned an empty model response")
         return content
+
+
+class RecordingRoleModel:
+    """Record exact role messages and raw responses for local run logs."""
+
+    def __init__(self, model: RoleModel) -> None:
+        self._model = model
+        self.exchanges: list[ModelExchange] = []
+
+    def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
+        """Delegate generation and retain a secret-free exchange record."""
+        started = time.perf_counter()
+        copied_messages = [dict(message) for message in messages]
+        try:
+            response = self._model.generate(role=role, messages=messages)
+        except Exception as error:
+            self.exchanges.append(
+                ModelExchange(
+                    role=role,
+                    messages=copied_messages,
+                    response=None,
+                    latency_seconds=time.perf_counter() - started,
+                    error=f"{type(error).__name__}: {error}",
+                )
+            )
+            raise
+        self.exchanges.append(
+            ModelExchange(
+                role=role,
+                messages=copied_messages,
+                response=response,
+                latency_seconds=time.perf_counter() - started,
+            )
+        )
+        return response
 
 
 def build_scripted_model(scenario: str) -> ScriptedRoleModel:

@@ -6,6 +6,7 @@ import pytest
 from data_analysis_agent.demo import (
     PROJECT_ROOT,
     DemoInputError,
+    format_workflow_result,
     main,
     run_demo,
     stage_input_files,
@@ -49,26 +50,58 @@ def test_replan_demo_returns_all_three_requested_values() -> None:
     assert "Mean = 13" in result["final_answer"]
     assert "Sample standard error = 1.291" in result["final_answer"]
     assert "Number of observations used = 4" in result["final_answer"]
+    assert len(result["iteration_history"]) == 2
+    assert result["iteration_history"][0]["verification_decision"] == "REPLAN"
+    assert result["iteration_history"][1]["verification_decision"] == "PASS"
 
 
 def test_offline_cli_prints_public_graph_state(
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
-    exit_status = main(["--mode", "offline", "--scenario", "happy"])
+    exit_status = main(
+        [
+            "--mode",
+            "offline",
+            "--scenario",
+            "happy",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
 
     output = capsys.readouterr().out
     assert exit_status == 0
     for label in (
-        "Mode:",
+        "PROTOTYPE V0 — HAPPY DEMO",
         "Question:",
         "Staged files:",
+        "ITERATION 1",
         "Plan:",
         "Execution result:",
-        "Verification decision:",
-        "Verification feedback:",
-        "Replan count:",
-        "Trace:",
-        "Final status:",
+        "Decision : PASS",
+        "Route:",
+        "FINAL RESULT",
+        "Replan count : 0",
         "Final answer:",
+        "Detailed log:",
     ):
         assert label in output
+
+
+def test_replan_terminal_output_shows_both_iterations(tmp_path: Path) -> None:
+    result = run_demo(mode="offline", scenario="replan")
+
+    output = format_workflow_result(
+        mode="offline",
+        scenario="replan",
+        result=result,
+        log_path=tmp_path / "workflow.log",
+    )
+
+    assert "ITERATION 1" in output
+    assert "ITERATION 2" in output
+    assert "Decision : REPLAN" in output
+    assert "Verifier -> Planner" in output
+    assert "Decision : PASS" in output
+    assert "Verifier -> Finalize" in output

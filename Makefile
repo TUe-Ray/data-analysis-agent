@@ -1,4 +1,4 @@
-.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-live
+.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-live verifier-eval-live verifier-eval-live-3
 
 PYTHON ?= python3
 
@@ -35,3 +35,9 @@ demo-v0-live:
 	$(PYTHON) -m data_analysis_agent.demo --mode live \
 		--prompt examples/prompts/verifier_trap.txt \
 		--file examples/data/measurements_with_missing.csv
+
+verifier-eval-live:
+	$(PYTHON) -m data_analysis_agent.demo verifier-eval --repeats 1
+
+verifier-eval-live-3:
+	$(PYTHON) -m data_analysis_agent.demo verifier-eval --repeats 3

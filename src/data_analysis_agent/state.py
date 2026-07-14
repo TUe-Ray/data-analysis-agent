@@ -3,6 +3,17 @@
 from typing import Literal, TypedDict
 
 
+class IterationRecord(TypedDict):
+    """Public outputs from one Planner/Executor/Verifier iteration."""
+
+    iteration: int
+    plan: str
+    execution_result: str
+    verification_decision: Literal["PASS", "REPLAN"]
+    verification_feedback: str
+    route: str
+
+
 class AgentState(TypedDict, total=False):
     """Values passed between the V0 Planner, Executor, and Verifier nodes."""
 
@@ -18,3 +29,4 @@ class AgentState(TypedDict, total=False):
     status: str
     final_answer: str
     trace: list[str]
+    iteration_history: list[IterationRecord]

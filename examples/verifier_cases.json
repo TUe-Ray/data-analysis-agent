@@ -1,0 +1,122 @@
+[
+  {
+    "case_id": "valid_complete_answer",
+    "category": "valid answer",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 1.291.\nNumber of observations used = 4.\nThe missing value was excluded and no imputation was performed.",
+    "expected_decision": "PASS",
+    "expected_issue": "none",
+    "severity": "none",
+    "notes": "Complete and numerically consistent answer."
+  },
+  {
+    "case_id": "missing_standard_error",
+    "category": "missing output",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nNumber of observations used = 4.\nThe missing value was excluded.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "The sample standard error requested by the user is missing.",
+    "severity": "major",
+    "notes": "Tests completeness."
+  },
+  {
+    "case_id": "missing_observation_count",
+    "category": "missing output",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 1.291.\nThe missing value was excluded.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "The number of observations used is missing.",
+    "severity": "major",
+    "notes": "Tests completeness."
+  },
+  {
+    "case_id": "wrong_observation_count",
+    "category": "numerical error",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 1.291.\nNumber of observations used = 5.\nThe missing value was excluded.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "There are only four non-missing observations.",
+    "severity": "major",
+    "notes": "Tests data-grounded counting."
+  },
+  {
+    "case_id": "standard_deviation_confused_with_standard_error",
+    "category": "statistical error",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 2.582.\nNumber of observations used = 4.\nThe missing value was excluded.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "2.582 is approximately the sample standard deviation, not the sample standard error.",
+    "severity": "major",
+    "notes": "Tests distinction between standard deviation and standard error."
+  },
+  {
+    "case_id": "population_standard_error_used",
+    "category": "statistical error",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 1.118.\nNumber of observations used = 4.\nThe missing value was excluded.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "The result uses a population-style variance denominator rather than the requested sample standard error based on n - 1.",
+    "severity": "major",
+    "notes": "Tests sample versus population denominator."
+  },
+  {
+    "case_id": "missing_value_imputed",
+    "category": "constraint violation",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "The missing value was imputed with the column mean.\nMean = 13.\nSample standard error = 1.000.\nNumber of observations used = 5.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "The user explicitly prohibited imputation.",
+    "severity": "major",
+    "notes": "Tests explicit constraint compliance."
+  },
+  {
+    "case_id": "unsupported_trend_claim",
+    "category": "unsupported claim",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 1.291.\nNumber of observations used = 4.\nThe measurements show a statistically significant increasing trend.",
+    "expected_decision": "REPLAN",
+    "expected_issue": "The requested descriptive calculations do not support a statistically significant trend claim, and no trend test was performed.",
+    "severity": "major",
+    "notes": "Tests discipline around inferential claims."
+  },
+  {
+    "case_id": "numerically_correct_but_method_unspecified",
+    "category": "concise valid answer",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.\nSample standard error = 1.291.\nNumber of observations used = 4.",
+    "expected_decision": "PASS",
+    "expected_issue": "none",
+    "severity": "none",
+    "notes": "A correct concise answer should not be rejected for omitting derivation."
+  },
+  {
+    "case_id": "minor_rounding_difference",
+    "category": "valid rounding",
+    "question": "Using the supplied CSV, calculate the arithmetic mean of the non-missing values, the sample standard error of the mean, and the number of observations used. Do not impute missing values. Your answer must include all three items.",
+    "file_paths": ["examples/data/measurements_with_missing.csv"],
+    "plan": "1. Read the value column.\n2. Exclude rows whose value is missing.\n3. Count the remaining observations.\n4. Calculate the arithmetic mean of the remaining values.\n5. Calculate the sample standard deviation using n - 1.\n6. Calculate the sample standard error as sample standard deviation divided by the square root of n.\n7. Report the mean, sample standard error, observation count, and missing-value handling.",
+    "execution_result": "Mean = 13.0.\nSample standard error = 1.29.\nNumber of observations used = 4.\nMissing values were ignored.",
+    "expected_decision": "PASS",
+    "expected_issue": "none",
+    "severity": "none",
+    "notes": "Reasonable rounding should be accepted."
+  }
+]

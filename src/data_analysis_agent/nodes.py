@@ -14,7 +14,7 @@ from data_analysis_agent.prompts import (
     build_verifier_messages,
 )
 from data_analysis_agent.schemas import VerificationOutput
-from data_analysis_agent.state import AgentState
+from data_analysis_agent.state import AgentState, IterationRecord
 
 Node = Callable[[AgentState], dict[str, object]]
 
@@ -82,10 +82,28 @@ def make_verifier_node(model: RoleModel) -> Node:
             raw_output = model.generate(role="verifier", messages=messages)
             try:
                 output = VerificationOutput.model_validate_json(raw_output)
+                route = (
+                    "Verifier -> Planner"
+                    if output.decision == "REPLAN"
+                    and state.get("replan_count", 0) < state.get("max_replans", 1)
+                    else "Verifier -> Finalize"
+                )
+                record: IterationRecord = {
+                    "iteration": state.get("replan_count", 0) + 1,
+                    "plan": state["plan"],
+                    "execution_result": state["execution_result"],
+                    "verification_decision": output.decision,
+                    "verification_feedback": output.feedback,
+                    "route": route,
+                }
                 return {
                     "verification_decision": output.decision,
                     "verification_feedback": output.feedback,
                     "trace": _trace(state, f"verifier:{output.decision}"),
+                    "iteration_history": [
+                        *state.get("iteration_history", []),
+                        record,
+                    ],
                 }
             except ValidationError as error:
                 validation_error = error

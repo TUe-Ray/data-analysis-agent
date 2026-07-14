@@ -59,8 +59,8 @@ After configuring credentials, manually verify API connectivity:
 make api-check
 ```
 
-`api-check` and `demo-v0-live` are the only commands that contact the live
-Nebius API.
+`api-check`, `demo-v0-live`, and the `verifier-eval-live` targets are the only
+commands that contact the live Nebius API.
 
 ## Prototype V0
 
@@ -96,14 +96,55 @@ Nebius Token Factory:
 make demo-v0-live
 ```
 
+Each demo prints separate Planner/Executor/Verifier iterations. Complete model
+messages and raw responses are written under `runs/demo_<timestamp>/`; `runs/`
+is ignored by Git.
+
+## Verifier Intelligence Evaluation
+
+The deterministic offline scenarios above test graph routing; they do not
+measure Verifier intelligence. The separate `verifier-eval` command sends ten
+fixed, human-labeled scientific cases to the real Nebius Verifier. Planner and
+Executor outputs remain fixed, so only the Verifier judgment is evaluated.
+
+Run one diagnostic repeat:
+
+```bash
+make verifier-eval-live
+```
+
+Run three repeats to inspect per-case agreement and decision stability:
+
+```bash
+make verifier-eval-live-3
+```
+
+You can also invoke the CLI directly:
+
+```bash
+python -m data_analysis_agent.demo verifier-eval --repeats 1
+```
+
+The terminal shows gold-versus-actual decisions, accuracy, false accepts, false
+rejects, and errors. False acceptance rate is the most important initial metric
+because it captures materially invalid answers incorrectly approved as `PASS`.
+Detailed prompts, raw responses, parsed decisions, latency, and metadata are
+saved under `runs/verifier_eval_<timestamp>/` in `evaluation.log`,
+`results.json`, and `run_config.json`.
+
+This is a small diagnostic suite, not a comprehensive scientific benchmark.
+Later versions will add deterministic numerical and scientific validators to
+reduce reliance on an LLM as judge.
+
 ## Current scope
 
 The project currently provides the V0 bounded verification loop, deterministic
-offline examples, environment-based configuration, a minimal OpenAI-compatible
-Nebius client factory, and manual live connectivity/demo commands.
+offline examples, a small live Verifier diagnostic suite, environment-based
+configuration, a minimal OpenAI-compatible Nebius client factory, and manual
+live connectivity/demo commands.
 
 ## Not implemented yet
 
 The following are intentionally deferred: Task Contract, EDA and schema
 resolution, generated-code execution, deterministic validators, Evidence Pack,
-advanced failure routing, persistence, UI, and evaluation.
+advanced failure routing, persistence, and UI.

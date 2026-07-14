@@ -66,6 +66,31 @@ def test_replan_routes_back_and_recovers() -> None:
         "finalize",
     ]
     assert role_counts(model) == {"planner": 2, "executor": 2, "verifier": 2}
+    assert result["iteration_history"] == [
+        {
+            "iteration": 1,
+            "plan": (
+                "1. Identify non-missing values.\n"
+                "2. Calculate the arithmetic mean.\n"
+                "3. Report the mean."
+            ),
+            "execution_result": "Mean = 13.",
+            "verification_decision": "REPLAN",
+            "verification_feedback": (
+                "The user also requested the sample standard error and the number "
+                "of observations used."
+            ),
+            "route": "Verifier -> Planner",
+        },
+        {
+            "iteration": 2,
+            "plan": result["plan"],
+            "execution_result": result["execution_result"],
+            "verification_decision": "PASS",
+            "verification_feedback": result["verification_feedback"],
+            "route": "Verifier -> Finalize",
+        },
+    ]
 
 
 def test_max_replan_terminates_without_claiming_pass() -> None:
