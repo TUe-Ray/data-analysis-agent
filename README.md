@@ -59,8 +59,9 @@ After configuring credentials, manually verify API connectivity:
 make api-check
 ```
 
-`api-check`, `demo-v0-live`, and the `verifier-eval-live` targets are the only
-commands that contact the live Nebius API.
+`api-check`, `demo-v0-live`, `verifier-eval-live`, and
+`benchmark-smoke-live` contact the live Nebius API. `benchmark-smoke` and all
+pytest tests are deterministic and offline.
 
 ## Goal-driven analysis workflow
 
@@ -148,7 +149,10 @@ make demo-v0-live
 ```
 
 Each demo prints separate goal executions and a final count of completed goals,
-trusted-tool calls, generated scripts, and repairs. Complete model exchanges,
+trusted-tool calls, generated script versions, and repairs. Generated-code
+execution is summarized with status, exit code, repair state, result or error,
+artifact count, and one repository-relative containing directory. The terminal
+never prints the full artifact array. Complete model exchanges,
 structured plans, factual execution results, validation details, and raw
 responses are written under `runs/demo_<timestamp>/workflow.log`.
 
@@ -256,13 +260,70 @@ This is a small diagnostic suite, not a comprehensive scientific benchmark.
 Later versions will add deterministic numerical and scientific validators to
 reduce reliance on an LLM as judge.
 
+## Three-way benchmark harness
+
+The benchmark runs every task through three independent approaches on the same
+public prompt, data, answer schema, backbone model, and generation settings:
+
+- `direct_answer` measures raw single-call reasoning over the complete prompt
+  and data. It makes exactly one model call and has no execution, tools, retry,
+  or output repair.
+- `one_shot_code` measures the benefit of one code-generation call followed by
+  one constrained Python execution. It has no Planner, Verifier, repair, or
+  replan.
+- `agent` uses the existing Planner, goal-by-goal Executor, trusted tools or
+  generated Python, bounded local repair, Verifier, bounded global replan, and
+  validated final JSON workflow.
+
+Internal Verifier approval is not the benchmark grade. Ground truth, reference
+values, grader code, and private grading metadata are isolated from every
+model-facing component through a `PublicTaskView`; only public files are staged.
+After an approach finishes, the orchestrator applies the same deterministic
+Python grader. Grader feedback is never fed back into that attempt.
+
+The full agent is expected to use more calls, tokens, and latency. The benchmark
+records and reports those costs rather than hiding them. Token counts remain
+`null`/`n/a` when the API does not return usage. The included
+`successive_difference_smoke` package validates infrastructure only; difficult
+synthetic and open-source tasks will be added later.
+
+Run the fully offline smoke comparison:
+
+```bash
+make benchmark-smoke
+```
+
+Or select approaches and repeats directly:
+
+```bash
+python -m data_analysis_agent.benchmark \
+  --task successive_difference_smoke \
+  --approaches direct_answer,one_shot_code,agent \
+  --repeats 3
+```
+
+Detailed configuration, one JSONL row per attempt, aggregate metrics, generated
+code, captured output, candidates, external grades, and agent artifacts are
+saved separately under `benchmark_runs/<benchmark_run_id>/`. That directory is
+gitignored and never mixed with ordinary demo runs.
+
+After configuring Nebius credentials, the manual live comparison is:
+
+```bash
+make benchmark-smoke-live
+```
+
+This live command uses temperature zero by default and is never run by pytest.
+No live comparison result is claimed in this README.
+
 ## Current scope
 
 The project currently provides goal-driven sequential execution, the bounded
 verification loop, one bounded local code repair, one bounded JSON-output
 repair, deterministic offline examples, a small live Verifier diagnostic suite,
-environment-based configuration, a minimal OpenAI-compatible Nebius client
-factory, and manual live connectivity/demo commands.
+an isolated three-way benchmark harness, environment-based configuration, a
+minimal OpenAI-compatible Nebius client factory, and manual live
+connectivity/demo/benchmark commands.
 
 ## Not implemented yet
 

@@ -1,4 +1,4 @@
-.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-valid-json demo-v0-output-repair demo-v0-output-failure demo-v0-live demo-tools-success demo-python-success demo-python-repair demo-python-failure verifier-eval-live verifier-eval-live-3
+.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-valid-json demo-v0-output-repair demo-v0-output-failure demo-v0-live demo-tools-success demo-python-success demo-python-repair demo-python-failure verifier-eval-live verifier-eval-live-3 benchmark-smoke benchmark-smoke-live
 
 VENV ?= .venv
 PYTHON ?= $(VENV)/bin/python
@@ -65,3 +65,11 @@ verifier-eval-live:
 
 verifier-eval-live-3:
 	$(PYTHON) -m data_analysis_agent.demo verifier-eval --repeats 3
+
+benchmark-smoke:
+	$(PYTHON) -m data_analysis_agent.benchmark \
+		--task successive_difference_smoke --approaches all --repeats 1
+
+benchmark-smoke-live:
+	$(PYTHON) -m data_analysis_agent.benchmark \
+		--task successive_difference_smoke --approaches all --repeats 1 --live

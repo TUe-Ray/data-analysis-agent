@@ -84,3 +84,15 @@ def test_runner_preserves_failed_and_repaired_versions(tmp_path: Path) -> None:
     assert (goal / "generated_code_v2.py").is_file()
     assert (goal / "execution_result_v1.json").is_file()
     assert (goal / "execution_result_v2.json").is_file()
+
+
+def test_runner_rejects_dynamic_read_paths(tmp_path: Path) -> None:
+    result = LocalPythonRunner().run(
+        code="name = input()\nprint(open(name).read())\n",
+        goal_directory=tmp_path / "goal",
+        allowed_files=[],
+        version=1,
+    )
+
+    assert not result.success
+    assert "Dynamic file paths" in (result.error or "")

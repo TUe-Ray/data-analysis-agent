@@ -1,0 +1,371 @@
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from data_analysis_agent.benchmark import (
+    DEFAULT_TASKS_ROOT,
+    _offline_model_factory,
+    format_benchmark_summary,
+    run_benchmark,
+)
+from data_analysis_agent.benchmark_approaches import (
+    build_direct_answer_messages,
+    build_one_shot_code_messages,
+    run_agent,
+    run_direct_answer,
+    run_one_shot_code,
+)
+from data_analysis_agent.benchmark_grading import (
+    compare_values,
+    grade_candidate,
+    invalid_candidate_grade,
+    numeric_match,
+)
+from data_analysis_agent.benchmark_tasks import (
+    load_benchmark_task,
+    stage_public_task,
+)
+from data_analysis_agent.benchmark_types import BenchmarkConfig, PublicTaskView
+from data_analysis_agent.models import ScriptedRoleModel
+from data_analysis_agent.python_runner import LocalPythonRunner
+
+
+@pytest.fixture
+def task():
+    return load_benchmark_task(DEFAULT_TASKS_ROOT, "successive_difference_smoke")
+
+
+@pytest.fixture
+def config() -> BenchmarkConfig:
+    return BenchmarkConfig(
+        model="offline-test-model",
+        task_ids=["successive_difference_smoke"],
+        approaches=["direct_answer", "one_shot_code", "agent"],
+    )
+
+
+def _final(value: float) -> str:
+    return json.dumps(
+        {
+            "status": "completed",
+            "answer": "done",
+            "key_results": {"mean_absolute_successive_difference": value},
+            "limitations": [],
+        }
+    )
+
+
+def test_public_task_view_excludes_private_grading_fields(task) -> None:
+    dumped = task.public.model_dump_json()
+    assert "grader_path" not in dumped
+    assert "reference_path" not in dumped
+    assert "absolute_tolerance" not in dumped
+    assert set(PublicTaskView.model_fields).isdisjoint(
+        {"grader_path", "reference_path", "reference"}
+    )
+
+
+def test_baseline_messages_contain_only_public_material(task, tmp_path: Path) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    hidden_reference = Path(task.private.reference_path).read_text(encoding="utf-8")
+    direct = "\n".join(
+        message["content"] for message in build_direct_answer_messages(public)
+    )
+    code = "\n".join(
+        message["content"] for message in build_one_shot_code_messages(public)
+    )
+
+    assert public.prompt in direct
+    assert "s5,16" in direct
+    assert public.prompt in code
+    assert "grader.py" not in direct + code
+    assert "reference.json" not in direct + code
+    assert "absolute_tolerance" not in direct + code
+    assert hidden_reference not in direct + code
+
+
+def test_direct_answer_is_exactly_one_call_without_execution_or_repair(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = ScriptedRoleModel({"direct_answer": [_final(2.0)]})
+    with patch.object(LocalPythonRunner, "run") as execute:
+        outcome = run_direct_answer(
+            public=public,
+            model=model,
+            run_directory=tmp_path / "attempt",
+            config=config,
+        )
+
+    execute.assert_not_called()
+    assert len(model.calls) == 1
+    assert model.calls[0].role == "direct_answer"
+    assert outcome.status == "completed"
+    assert outcome.api_call_count == 1
+    assert outcome.generated_script_count == 0
+    assert outcome.local_repair_count == 0
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [(_final(3.0), "completed"), ("not json", "invalid_json")],
+)
+def test_direct_answer_wrong_and_invalid_are_not_retried(
+    task, tmp_path: Path, config: BenchmarkConfig, response: str, status: str
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = ScriptedRoleModel({"direct_answer": [response]})
+    outcome = run_direct_answer(
+        public=public,
+        model=model,
+        run_directory=tmp_path / "attempt",
+        config=config,
+    )
+    assert outcome.status == status
+    assert len(model.calls) == 1
+
+
+def test_direct_answer_context_limit_is_not_applicable_without_call(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = ScriptedRoleModel({"direct_answer": [_final(2.0)]})
+    limited = config.model_copy(update={"direct_answer_max_input_chars": 1})
+    outcome = run_direct_answer(
+        public=public,
+        model=model,
+        run_directory=tmp_path / "attempt",
+        config=limited,
+    )
+    assert outcome.status == "not_applicable"
+    assert outcome.api_call_count == 0
+    assert model.calls == []
+
+
+def test_one_shot_code_calls_once_executes_once_and_never_verifies_or_repairs(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = ScriptedRoleModel({"one_shot_code": [f"print({_final(2.0)!r})\n"]})
+    outcome = run_one_shot_code(
+        public=public,
+        model=model,
+        run_directory=tmp_path / "attempt",
+        config=config,
+    )
+
+    scripts = list((tmp_path / "attempt").rglob("generated_code_v*.py"))
+    assert outcome.status == "completed"
+    assert outcome.generated_script_count == 1
+    assert outcome.local_repair_count == 0
+    assert len(scripts) == 1
+    assert [call.role for call in model.calls] == ["one_shot_code"]
+
+
+def test_one_shot_failure_is_not_repaired(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = ScriptedRoleModel({"one_shot_code": ["raise RuntimeError('boom')\n"]})
+    outcome = run_one_shot_code(
+        public=public,
+        model=model,
+        run_directory=tmp_path / "attempt",
+        config=config,
+    )
+    assert outcome.status == "execution_failed"
+    assert len(model.calls) == 1
+    assert outcome.generated_script_count == 1
+    assert outcome.local_repair_count == 0
+
+
+def test_one_shot_invalid_json_is_recorded_without_retry(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = ScriptedRoleModel({"one_shot_code": ["print('not json')\n"]})
+    outcome = run_one_shot_code(
+        public=public,
+        model=model,
+        run_directory=tmp_path / "attempt",
+        config=config,
+    )
+    assert outcome.status == "invalid_json"
+    assert len(model.calls) == 1
+    assert outcome.generated_script_count == 1
+
+
+def test_staging_and_python_policy_exclude_private_files(task, tmp_path: Path) -> None:
+    attempt = tmp_path / "attempt"
+    public = stage_public_task(task.public, attempt)
+    staged_names = [path.name for path in attempt.rglob("*") if path.is_file()]
+    assert "grader.py" not in staged_names
+    assert "reference.json" not in staged_names
+    assert all("private" not in Path(path).parts for path in public.data_files)
+
+    private_reference = Path(task.private.reference_path)
+    result = LocalPythonRunner().run(
+        code=f"print(open({str(private_reference)!r}).read())\n",
+        goal_directory=attempt / "execution",
+        allowed_files=[Path(path) for path in public.data_files],
+        version=1,
+    )
+    assert not result.success
+    assert "not staged" in (result.error or "")
+
+
+def test_deterministic_grader_success_wrong_missing_invalid_and_tolerance(task) -> None:
+    correct = json.loads(_final(2.0))
+    wrong = json.loads(_final(2.1))
+    missing = {"status": "completed", "answer": "none", "limitations": []}
+
+    assert grade_candidate(correct, task.private).passed
+    assert not grade_candidate(wrong, task.private).passed
+    assert "numerical mismatch" in grade_candidate(wrong, task.private).errors[0]
+    assert not grade_candidate(missing, task.private).passed
+    assert not invalid_candidate_grade("invalid JSON").passed
+    assert numeric_match(2.0 + 5e-13, 2.0, 1e-12)
+    assert not numeric_match(2.0 + 2e-12, 2.0, 1e-12)
+    assert compare_values([2, 1], [1, 2], unordered=True)
+
+
+def _wrong_agent_factory(approach, public):
+    assert approach == "agent"
+    path = public.data_files[0]
+    plan = json.dumps(
+        {
+            "scientific_objective": "Compute the statistic.",
+            "goals": [
+                {
+                    "goal_id": "calculate",
+                    "objective": "Compute the requested statistic.",
+                    "required_outputs": ["mean_absolute_successive_difference"],
+                    "constraints": [],
+                    "success_criteria": ["Report it."],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    strategy = json.dumps(
+        {
+            "strategy": "generated_python",
+            "capability_name": None,
+            "arguments": {},
+            "concise_reason": "Generate code.",
+        }
+    )
+    code = (
+        f"open({path!r}).read()\n"
+        "print('{\"mean_absolute_successive_difference\": 3.0}')\n"
+    )
+    verifier = '{"decision":"PASS","feedback":"Looks complete."}'
+    return ScriptedRoleModel(
+        {"planner": [plan], "executor": [strategy, code], "verifier": [verifier]}
+    )
+
+
+def test_agent_uses_full_workflow_but_external_grade_overrides_verifier_pass(
+    tmp_path: Path,
+) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=["agent"],
+    )
+    summary, results = run_benchmark(
+        config=config,
+        output_root=tmp_path / "runs",
+        model_factory=_wrong_agent_factory,
+        project_root=tmp_path,
+    )
+    result = results[0]
+    assert result.verifier_decisions == ["PASS"]
+    assert not result.graded_success
+    assert result.status == "wrong_answer"
+    assert summary.metrics["agent"].passed_runs == 0
+
+
+def test_replan_decision_is_not_an_external_grade(task) -> None:
+    wrong = json.loads(_final(3.0))
+    grade = grade_candidate(wrong, task.private)
+    verifier_decisions = ["REPLAN"]
+    assert verifier_decisions == ["REPLAN"]
+    assert not grade.passed
+    assert all("REPLAN" not in error for error in grade.errors)
+
+
+def test_agent_messages_and_log_never_contain_private_ground_truth(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    model = _offline_model_factory("agent", public)
+    outcome = run_agent(
+        public=public,
+        model=model,
+        run_directory=tmp_path / "attempt",
+        config=config,
+    )
+    assert outcome.status == "completed"
+    messages = json.dumps([call.messages for call in model.calls])
+    log = (tmp_path / "attempt/agent_run/workflow.log").read_text(encoding="utf-8")
+    for hidden in ("absolute_tolerance", "reference.json", "grader.py"):
+        assert hidden not in messages
+        assert hidden not in log
+    assert {call.role for call in model.calls} == {"planner", "executor", "verifier"}
+
+
+def test_orchestrator_isolates_attempts_persists_rows_and_summarizes_offline(
+    tmp_path: Path,
+) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=["direct_answer", "one_shot_code", "agent"],
+        repeats=2,
+    )
+    with (
+        patch("data_analysis_agent.benchmark.load_settings") as settings,
+        patch("data_analysis_agent.benchmark.create_nebius_client") as client,
+    ):
+        summary, results = run_benchmark(
+            config=config,
+            output_root=tmp_path / "benchmark_runs",
+            project_root=tmp_path,
+        )
+    settings.assert_not_called()
+    client.assert_not_called()
+    assert len(results) == 6
+    result_path = tmp_path / summary.results_path
+    assert len(result_path.read_text(encoding="utf-8").splitlines()) == 6
+    assert len({result.artifact_directory for result in results}) == 6
+    staged_contents = {
+        tuple(
+            path.read_text(encoding="utf-8")
+            for path in sorted(
+                (tmp_path / result.artifact_directory / "inputs").rglob("*")
+            )
+            if path.is_file()
+        )
+        for result in results
+    }
+    smoke_data = (
+        DEFAULT_TASKS_ROOT
+        / "successive_difference_smoke/public/data/measurements_with_missing.csv"
+    ).read_text(encoding="utf-8")
+    assert staged_contents == {(smoke_data,)}
+    assert all(result.graded_success for result in results)
+    assert summary.metrics["direct_answer"].average_api_calls == 1
+    assert summary.metrics["one_shot_code"].average_generated_script_versions == 1
+    assert summary.metrics["agent"].average_api_calls == 4
+    output = format_benchmark_summary(summary, results)
+    assert "Complete input data" not in output
+    assert "mean_absolute_successive_difference = 2.0" not in output
+    assert "direct_answer" in output
+
+
+def test_benchmark_runs_directory_is_gitignored() -> None:
+    gitignore = (DEFAULT_TASKS_ROOT.parent / ".gitignore").read_text(encoding="utf-8")
+    assert "benchmark_runs/" in gitignore.splitlines()

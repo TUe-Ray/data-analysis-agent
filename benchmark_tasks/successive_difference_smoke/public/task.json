@@ -1,0 +1,19 @@
+{
+  "answer_schema": {
+    "type": "object",
+    "required": ["status", "answer", "key_results", "limitations"],
+    "properties": {
+      "status": {"enum": ["completed", "completed_with_limitations"]},
+      "answer": {"type": "string"},
+      "key_results": {
+        "type": "object",
+        "required": ["mean_absolute_successive_difference"]
+      },
+      "limitations": {"type": "array", "items": {"type": "string"}}
+    },
+    "additionalProperties": false
+  },
+  "metadata": {
+    "description": "Infrastructure-only smoke task"
+  }
+}

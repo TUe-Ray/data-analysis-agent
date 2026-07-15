@@ -301,6 +301,8 @@ def _generated_result(
             + [str(metadata_path)]
         )
     )
+    saved_artifact_count = sum(path.is_file() for path in goal_directory.rglob("*"))
+    latest_stderr_path = goal_directory / f"stderr_v{final.version}.txt"
     result = GoalResult(
         goal_id=goal.goal_id,
         success=final.success,
@@ -318,6 +320,10 @@ def _generated_result(
         "error": final.error,
         "duration_seconds": final.duration_seconds,
         "repair_required": repair_count == 1,
+        "timed_out": final.timed_out,
+        "artifact_count": saved_artifact_count,
+        "artifact_directory": str(goal_directory),
+        "latest_stderr_path": str(latest_stderr_path),
         "artifact_paths": artifact_paths,
     }
     return (

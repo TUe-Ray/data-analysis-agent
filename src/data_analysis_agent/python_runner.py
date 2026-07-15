@@ -90,16 +90,20 @@ class PythonPolicyError(ValueError):
     """Raised when generated source violates the prototype AST policy."""
 
 
-def _literal_path(node: ast.AST | None) -> str | None:
+def _literal_path(
+    node: ast.AST | None, constants: dict[str, str] | None = None
+) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.Name) and constants is not None:
+        return constants.get(node.id)
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "Path"
         and node.args
     ):
-        return _literal_path(node.args[0])
+        return _literal_path(node.args[0], constants)
     return None
 
 
@@ -119,6 +123,17 @@ def validate_generated_code(
     run_root = run_directory.resolve()
     allowed = {path.resolve() for path in allowed_files}
     standard_library = set(getattr(sys, "stdlib_module_names", ()))
+    constants: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(
+            node.value, ast.AST
+        ):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = _literal_path(node.value, constants)
+            if value is not None:
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = value
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -149,19 +164,19 @@ def validate_generated_code(
         if call_name == "open":
             is_path_method = isinstance(node.func, ast.Attribute)
             supplied = (
-                _literal_path(node.func.value)
+                _literal_path(node.func.value, constants)
                 if is_path_method
-                else _literal_path(path_argument)
+                else _literal_path(path_argument, constants)
             )
             mode_index = 0 if is_path_method else 1
             mode = (
-                _literal_path(node.args[mode_index])
+                _literal_path(node.args[mode_index], constants)
                 if len(node.args) > mode_index
                 else "r"
             )
             for keyword in node.keywords:
                 if keyword.arg == "mode":
-                    mode = _literal_path(keyword.value)
+                    mode = _literal_path(keyword.value, constants)
             if supplied is not None:
                 resolved = (run_root / supplied).resolve()
                 if any(flag in (mode or "r") for flag in "wax+"):
@@ -169,28 +184,34 @@ def validate_generated_code(
                         raise PythonPolicyError("Writing outside the run directory")
                 elif resolved not in allowed:
                     raise PythonPolicyError("Reading a file that was not staged")
+            else:
+                raise PythonPolicyError("Dynamic file paths are prohibited")
         elif call_name in WRITE_METHODS:
             supplied = (
-                _literal_path(node.func.value)
+                _literal_path(node.func.value, constants)
                 if isinstance(node.func, ast.Attribute)
                 and call_name in {"write_text", "write_bytes"}
-                else _literal_path(path_argument)
+                else _literal_path(path_argument, constants)
             )
             if supplied is not None:
                 resolved = (run_root / supplied).resolve()
                 if not _within(resolved, [run_root]):
                     raise PythonPolicyError("Writing outside the run directory")
+            else:
+                raise PythonPolicyError("Dynamic file paths are prohibited")
         elif call_name in READ_METHODS:
             supplied = (
-                _literal_path(node.func.value)
+                _literal_path(node.func.value, constants)
                 if isinstance(node.func, ast.Attribute)
                 and call_name in {"read_text", "read_bytes"}
-                else _literal_path(path_argument)
+                else _literal_path(path_argument, constants)
             )
             if supplied is not None:
                 resolved = Path(supplied).resolve()
                 if resolved not in allowed:
                     raise PythonPolicyError("Reading a file that was not staged")
+            else:
+                raise PythonPolicyError("Dynamic file paths are prohibited")
 
 
 def _parse_json_result(stdout: str, goal_directory: Path) -> dict[str, JsonValue]:

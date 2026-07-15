@@ -22,6 +22,7 @@ from data_analysis_agent.nodes import (
     output_validator_node,
     select_current_goal_node,
 )
+from data_analysis_agent.python_runner import LocalPythonRunner
 from data_analysis_agent.schemas import HighLevelPlan
 from data_analysis_agent.state import AgentState
 
@@ -63,13 +64,14 @@ def route_after_output_validation(
 def build_graph(
     model: RoleModel,
     output_provider: FinalOutputProvider | None = None,
+    runner: LocalPythonRunner | None = None,
 ):
     """Compile the bounded scientific and JSON-output validation workflow."""
     output_provider = output_provider or DeterministicFinalOutputProvider()
     workflow = StateGraph(AgentState)
     workflow.add_node("planner", make_planner_node(model))
     workflow.add_node("select_current_goal", select_current_goal_node)
-    workflow.add_node("executor", make_executor_node(model))
+    workflow.add_node("executor", make_executor_node(model, runner))
     workflow.add_node("verifier", make_verifier_node(model))
     workflow.add_node(
         "final_answer_generator",

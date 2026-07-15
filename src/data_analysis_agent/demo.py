@@ -146,6 +146,7 @@ def _write_workflow_log(
                 "Raw response:",
                 exchange.response or "none",
                 f"Latency seconds: {exchange.latency_seconds:.6f}",
+                "Token usage: " + json.dumps(exchange.token_usage, ensure_ascii=False),
                 f"Error: {exchange.error or 'none'}",
                 "",
             ]
@@ -184,6 +185,13 @@ def _write_workflow_log(
         raise DemoInputError(
             f"Could not write workflow log {log_path}: {error}"
         ) from error
+
+
+def write_workflow_log(
+    *, log_path: Path, result: AgentState, exchanges: list[ModelExchange]
+) -> None:
+    """Persist the complete workflow details omitted from terminal output."""
+    _write_workflow_log(log_path=log_path, result=result, exchanges=exchanges)
 
 
 def run_demo(
@@ -242,7 +250,7 @@ def run_demo(
         ),
     )
     if log_path is not None:
-        _write_workflow_log(
+        write_workflow_log(
             log_path=log_path, result=result, exchanges=recorder.exchanges
         )
     return result
@@ -298,8 +306,7 @@ def format_workflow_result(
                     "Strategy:",
                     (f"{record.get('strategy')} — {capability or ''}").rstrip(" —"),
                     "",
-                    "Result summary:",
-                    record["execution_result"],
+                    *_format_goal_execution(result=result, record=record),
                     "",
                     "Verifier:",
                     f"Decision : {record['verification_decision']}",
@@ -367,12 +374,13 @@ def format_workflow_result(
             DIVIDER,
             "FINAL RESULT",
             DIVIDER,
-            f"Status       : {result['status']}",
-            f"Replan count : {result['replan_count']}",
-            f"Goals completed : {len(result.get('completed_goal_results', []))}",
-            f"Trusted-tool calls : {result.get('trusted_tool_calls', 0)}",
-            f"Generated scripts : {result.get('generated_script_count', 0)}",
-            f"Code repairs : {result.get('code_repair_count', 0)}",
+            f"Status                    : {result['status']}",
+            f"Global replans            : {result['replan_count']}",
+            "Goals completed           : "
+            f"{len(result.get('completed_goal_results', []))}",
+            f"Trusted-tool calls        : {result.get('trusted_tool_calls', 0)}",
+            f"Generated script versions : {result.get('generated_script_count', 0)}",
+            f"Local code repairs        : {result.get('code_repair_count', 0)}",
             "",
             "JSON:",
             result["final_answer"],
@@ -382,6 +390,64 @@ def format_workflow_result(
         ]
     )
     return "\n".join(lines)
+
+
+def _relative_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _format_result_values(values: object) -> str:
+    if not isinstance(values, dict) or not values:
+        return "none"
+    return ", ".join(f"{key} = {value}" for key, value in values.items())
+
+
+def _format_goal_execution(
+    *, result: AgentState, record: dict[str, object]
+) -> list[str]:
+    """Render execution facts without leaking the full artifact array."""
+    if record.get("strategy") != "generated_python":
+        return ["Result summary:", str(record.get("execution_result", ""))]
+    try:
+        execution = json.loads(str(record.get("execution_result", "{}")))
+    except json.JSONDecodeError:
+        return ["Execution result:", str(record.get("execution_result", ""))]
+    if not isinstance(execution, dict) or "success" not in execution:
+        return ["Execution result:", str(record.get("execution_result", ""))]
+
+    goal_id = str(record.get("goal_id", "goal"))
+    goal_directory = Path(result.get("run_directory", "")) / "goals" / goal_id
+    artifact_count = execution.get("artifact_count")
+    if not isinstance(artifact_count, int):
+        artifact_count = len(execution.get("artifact_paths", []))
+    lines = [
+        "Execution:",
+        f"Status        : {'SUCCESS' if execution.get('success') else 'FAILED'}",
+        f"Exit code     : {execution.get('exit_code')}",
+        f"Repair needed : {'yes' if execution.get('repair_required') else 'no'}",
+    ]
+    if execution.get("success"):
+        lines.append(
+            f"Result        : {_format_result_values(execution.get('result'))}"
+        )
+    else:
+        lines.append(f"Error         : {execution.get('error') or 'unknown error'}")
+    lines.extend(
+        [
+            f"Artifacts     : {artifact_count} files saved",
+            "",
+            "Artifact directory:",
+            _relative_path(goal_directory) + "/",
+        ]
+    )
+    if not execution.get("success"):
+        latest_stderr = execution.get("latest_stderr_path")
+        if isinstance(latest_stderr, str):
+            lines.extend(["", "Latest stderr:", _relative_path(Path(latest_stderr))])
+    return lines
 
 
 def build_demo_parser() -> argparse.ArgumentParser:

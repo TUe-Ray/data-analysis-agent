@@ -82,7 +82,7 @@ def test_offline_cli_prints_public_graph_state(
         "Decision : PASS",
         "Route:",
         "FINAL RESULT",
-        "Replan count : 0",
+        "Global replans            : 0",
         "JSON:",
         "Detailed log:",
     ):
@@ -147,6 +147,35 @@ def test_output_repair_terminal_is_readable(tmp_path: Path) -> None:
         "Output Validator -> Output Repair",
         "Repair attempt : 1",
         "Attempt 2 : VALID",
-        "Status       : completed",
+        "Status                    : completed",
     ):
         assert text in output
+
+
+def test_generated_python_terminal_uses_compact_artifact_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_path = tmp_path / "run" / "workflow.log"
+    log_path.parent.mkdir()
+    result = run_demo(
+        mode="offline", scenario="generated-python-repair", log_path=log_path
+    )
+    monkeypatch.setattr("data_analysis_agent.demo.PROJECT_ROOT", tmp_path)
+
+    output = format_workflow_result(
+        mode="offline",
+        scenario="generated-python-repair",
+        result=result,
+        log_path=log_path,
+    )
+
+    artifact_path = result["completed_goal_results"][0]["artifact_paths"][0]
+    assert "artifact_paths" not in output
+    assert artifact_path not in output
+    assert "Artifacts     : " in output
+    assert "files saved" in output
+    assert "Artifact directory:\nrun/goals/compute_successive_difference/" in output
+    assert "Generated script versions : 2" in output
+    detailed_log = log_path.read_text(encoding="utf-8")
+    assert artifact_path in detailed_log
+    assert '"artifact_paths"' in detailed_log

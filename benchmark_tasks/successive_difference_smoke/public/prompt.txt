@@ -1,0 +1,2 @@
+Using the supplied CSV, compute the mean absolute successive difference of the
+non-missing value sequence. Preserve the input order and do not impute values.

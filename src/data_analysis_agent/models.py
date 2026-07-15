@@ -10,7 +10,13 @@ from typing import Literal, Protocol
 
 from openai import OpenAI
 
-Role = Literal["planner", "executor", "verifier"]
+Role = Literal[
+    "planner",
+    "executor",
+    "verifier",
+    "direct_answer",
+    "one_shot_code",
+]
 
 
 class RoleModel(Protocol):
@@ -38,6 +44,7 @@ class ModelExchange:
     response: str | None
     latency_seconds: float
     error: str | None = None
+    token_usage: dict[str, int] | None = None
 
 
 class ScriptedRoleModel:
@@ -49,6 +56,8 @@ class ScriptedRoleModel:
             "planner": 0,
             "executor": 0,
             "verifier": 0,
+            "direct_answer": 0,
+            "one_shot_code": 0,
         }
         self.calls: list[ModelCall] = []
 
@@ -69,28 +78,36 @@ class NebiusRoleModel:
     """Use one configured Nebius model for each V0 role."""
 
     def __init__(
-        self, *, client: OpenAI, model: str, temperature: float | None = None
+        self,
+        *,
+        client: OpenAI,
+        model: str,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         self._client = client
         self._model = model
         self._temperature = temperature
+        self._top_p = top_p
+        self._max_output_tokens = max_output_tokens
         self.last_token_usage: dict[str, int] | None = None
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Send a role-specific request through the OpenAI-compatible client."""
         del role
         self.last_token_usage = None
-        if self._temperature is None:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-            )
-        else:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=self._temperature,
-            )
+        arguments: dict[str, object] = {
+            "model": self._model,
+            "messages": messages,
+        }
+        if self._temperature is not None:
+            arguments["temperature"] = self._temperature
+        if self._top_p is not None:
+            arguments["top_p"] = self._top_p
+        if self._max_output_tokens is not None:
+            arguments["max_tokens"] = self._max_output_tokens
+        response = self._client.chat.completions.create(**arguments)
         if response.usage is not None:
             self.last_token_usage = {
                 "prompt_tokens": response.usage.prompt_tokens,
@@ -124,6 +141,7 @@ class RecordingRoleModel:
                     response=None,
                     latency_seconds=time.perf_counter() - started,
                     error=f"{type(error).__name__}: {error}",
+                    token_usage=_token_usage(self._model),
                 )
             )
             raise
@@ -133,9 +151,16 @@ class RecordingRoleModel:
                 messages=copied_messages,
                 response=response,
                 latency_seconds=time.perf_counter() - started,
+                token_usage=_token_usage(self._model),
             )
         )
         return response
+
+
+def _token_usage(model: RoleModel) -> dict[str, int] | None:
+    """Snapshot optional provider usage without requiring it from fake models."""
+    usage = getattr(model, "last_token_usage", None)
+    return dict(usage) if isinstance(usage, dict) else None
 
 
 def build_scripted_model(scenario: str) -> ScriptedRoleModel:

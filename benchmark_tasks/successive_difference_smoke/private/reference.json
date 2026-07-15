@@ -1,0 +1,4 @@
+{
+  "mean_absolute_successive_difference": 2.0,
+  "absolute_tolerance": 1e-12
+}
