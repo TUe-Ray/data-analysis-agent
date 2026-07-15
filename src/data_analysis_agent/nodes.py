@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import csv
 import hashlib
 import json
 import mimetypes
@@ -575,7 +576,7 @@ def _allowed_paths(state: AgentState) -> list[Path]:
     return list(dict.fromkeys(paths))
 
 
-def _approved_artifact_context(state: AgentState) -> list[dict[str, str | None]]:
+def _approved_artifact_context(state: AgentState) -> list[dict[str, object]]:
     """Provide model-facing provenance without exposing arbitrary goal files."""
     return [
         {
@@ -583,6 +584,8 @@ def _approved_artifact_context(state: AgentState) -> list[dict[str, str | None]]
             "path": artifact.path,
             "description": artifact.description,
             "media_type": artifact.media_type,
+            "columns": artifact.columns,
+            "row_count": artifact.row_count,
         }
         for artifact in _artifacts_available_to_current_goal(state)
     ]
@@ -650,6 +653,7 @@ def _declared_goal_artifacts(
                 f"{declaration.relative_name}"
             )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        columns, row_count = _tabular_artifact_metadata(path)
         artifacts.append(
             GoalArtifact(
                 artifact_id=f"{goal.goal_id}:{declaration.relative_name}:{digest[:12]}",
@@ -664,9 +668,26 @@ def _declared_goal_artifacts(
                 description=declaration.description,
                 size_bytes=path.stat().st_size,
                 sha256=digest,
+                columns=columns,
+                row_count=row_count,
             )
         )
     return artifacts
+
+
+def _tabular_artifact_metadata(path: Path) -> tuple[list[str] | None, int | None]:
+    """Capture CSV schema facts for downstream validation and repair prompts."""
+    if path.suffix.lower() != ".csv":
+        return None, None
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, None)
+            if not header:
+                return [], 0
+            return [str(column) for column in header], sum(1 for _ in reader)
+    except (OSError, UnicodeError, csv.Error):
+        return None, None
 
 
 def _registry(state: AgentState) -> TrustedToolRegistry:
@@ -1303,6 +1324,7 @@ def make_verifier_node(model: RoleModel) -> Node:
                 strategy=state.get("current_strategy", {}),
                 warnings=current_result.warnings,
                 prior_goal_results=list(state.get("completed_goal_results", [])),
+                pending_artifacts=list(state.get("pending_goal_artifacts", [])),
             )
         else:
             messages = build_verifier_messages(

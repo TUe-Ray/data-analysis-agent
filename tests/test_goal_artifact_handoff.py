@@ -115,6 +115,8 @@ def test_verified_artifact_is_registered_and_available_only_to_dependency(
     assert len(approved) == 1
     assert approved[0]["producer_goal_id"] == "G1"
     assert approved[0]["path"] == str(artifact_path)
+    assert approved[0]["columns"] == ["patient_id", "arm"]
+    assert approved[0]["row_count"] == 1
     assert Path(approved[0]["path"]).is_file()
     assert (tmp_path / "run/approved_goal_artifacts.json").is_file()
     g2_generation_call = model.calls[4]

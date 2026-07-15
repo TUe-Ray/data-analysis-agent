@@ -89,6 +89,8 @@ class GoalArtifact(BaseModel):
     description: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
     sha256: str = Field(min_length=64, max_length=64)
+    columns: list[str] | None = None
+    row_count: int | None = Field(default=None, ge=0)
 
 
 class GoalArtifactDeclaration(BaseModel):

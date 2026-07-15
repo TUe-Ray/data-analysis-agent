@@ -64,6 +64,10 @@ To request downstream handoff, include an "artifacts" list in __agent_result__; 
 item must contain relative_name, description, and optional media_type, and must name
 an eligible file written inside the current goal directory. Such files are available
 only after the independent Verifier returns PASS.
+Approved tabular artifacts list their factual columns. Use only columns that are
+listed; when an artifact lacks a field required for the goal, read an explicitly
+allowed staged input containing that field or an explicitly declared prerequisite
+artifact. Do not probe for fields by raising a KeyError.
 Never put summary text, JSON framing, Markdown fences, or explanation inside
 code_lines."""
 
@@ -115,6 +119,9 @@ Apply this rubric:
 7. The result contributes to the original scientific objective and follows the
    supplied plan without requiring every procedural step to be narrated.
 8. Accept reasonable rounding, but reject material omissions or errors.
+9. A declared artifact is evidence only for its factual manifest. Do not PASS an
+   artifact-dependent result if its listed columns cannot support the current goal
+   or explicitly stated downstream data requirement.
 
 Return PASS only when no material issue remains. Return REPLAN when correction is
 needed. Feedback must be concise, specific, and actionable. Return only valid JSON
@@ -247,7 +254,7 @@ def build_executor_messages(
     verification_feedback: str | None = None,
     capability_catalog: list[dict[str, JsonValue]] | None = None,
     staged_file_paths: list[str] | None = None,
-    approved_artifacts: list[dict[str, str | None]] | None = None,
+    approved_artifacts: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
     """Build a one-goal tactical context; ``plan`` retains V0 compatibility."""
     if current_goal is None:
@@ -283,7 +290,7 @@ def build_python_generation_messages(
     staged_file_paths: list[str],
     completed_goal_results: list[dict[str, JsonValue]],
     goal_directory: str,
-    approved_artifacts: list[dict[str, str | None]] | None = None,
+    approved_artifacts: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
     """Supply generated-code creation only the current factual execution context."""
     return [
@@ -320,7 +327,7 @@ def build_python_repair_messages(
     staged_file_paths: list[str],
     goal_directory: str,
     repair_history: list[dict[str, object]] | None = None,
-    approved_artifacts: list[dict[str, str | None]] | None = None,
+    approved_artifacts: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
     """Supply repair only the fixed goal, code, local failure, and allowlist."""
     return [
@@ -370,6 +377,7 @@ def build_verifier_messages(
     strategy: dict[str, JsonValue] | None = None,
     warnings: list[str] | None = None,
     prior_goal_results: list[dict[str, JsonValue]] | None = None,
+    pending_artifacts: list[dict[str, JsonValue]] | None = None,
 ) -> list[dict[str, str]]:
     """Build evidence-oriented verification context with no role histories."""
     if current_goal is None:
@@ -388,6 +396,10 @@ def build_verifier_messages(
                 f"Execution strategy summary:\n{json.dumps(strategy or {})}",
                 f"Factual execution result:\n{execution_result}",
                 f"Warnings:\n{json.dumps(warnings or [])}",
+                "Pending analysis artifact manifests (CSV headers and row counts are "
+                "factual). Return REPLAN when a declared artifact lacks fields needed "
+                "for the current goal or its stated downstream output:\n"
+                + json.dumps(pending_artifacts or []),
                 "Relevant prior GoalResults:\n" + json.dumps(prior_goal_results or []),
             ]
         )
