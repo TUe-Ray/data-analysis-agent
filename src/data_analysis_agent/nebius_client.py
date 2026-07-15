@@ -10,4 +10,5 @@ def create_nebius_client(settings: Settings) -> OpenAI:
     return OpenAI(
         api_key=settings.nebius_api_key,
         base_url=settings.nebius_base_url,
+        max_retries=0,
     )

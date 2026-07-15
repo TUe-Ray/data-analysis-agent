@@ -310,6 +310,21 @@ code, captured output, candidates, external grades, and agent artifacts are
 saved separately under `benchmark_runs/<benchmark_run_id>/`. That directory is
 gitignored and never mixed with ordinary demo runs.
 
+Benchmark run directories identify both the task and comparison scope. For
+example:
+
+```text
+benchmark_runs/
+    benchmark__successive_difference_smoke__three_way__2026-07-15_08-25-05Z/
+    benchmark__successive_difference_smoke__agent_only__2026-07-15_08-26-10Z/
+    benchmark__successive_difference_smoke__direct_answer-vs-one_shot_code__2026-07-15_08-27-30Z/
+```
+
+The terminal header also prints the Run ID, whether the run is a single
+approach or comparison, and the exact enabled approaches. If the same benchmark
+starts twice within one second, the later directory receives a readable
+`run_02` suffix instead of a random identifier.
+
 After configuring Nebius credentials, the manual live comparison is:
 
 ```bash

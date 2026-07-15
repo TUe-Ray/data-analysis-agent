@@ -21,7 +21,8 @@ Choose a trusted built-in capability when it directly satisfies the goal; otherw
 choose generated_python. Do not change the goal, remove outputs or constraints,
 judge scientific validity, or add unsupported conclusions. Return only one JSON
 ExecutionStrategy with strategy, capability_name, arguments, and a short
-concise_reason. Arguments must validate against the selected capability."""
+concise_reason. Arguments must validate against the selected capability. For
+generated_python, capability_name must be null and arguments must be {}."""
 
 PYTHON_GENERATION_SYSTEM_PROMPT = """Generate one deterministic Python script for
 the supplied fixed scientific goal. Use only the standard library, pandas, numpy,

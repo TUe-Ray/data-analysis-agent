@@ -78,7 +78,7 @@ def stage_public_task(public: PublicTaskView, destination: Path) -> PublicTaskVi
         target.parent.mkdir(parents=True, exist_ok=True)
         content = public.data_contents[name]
         target.write_text(content, encoding="utf-8")
-        staged_path = str(target.resolve())
+        staged_path = (Path("inputs") / source_name).as_posix()
         staged_files.append(staged_path)
         staged_contents[staged_path] = content
     return public.model_copy(

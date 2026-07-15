@@ -7,6 +7,8 @@ import pytest
 from data_analysis_agent.benchmark import (
     DEFAULT_TASKS_ROOT,
     _offline_model_factory,
+    benchmark_scope_label,
+    build_benchmark_run_id,
     format_benchmark_summary,
     run_benchmark,
 )
@@ -55,6 +57,40 @@ def _final(value: float) -> str:
             "limitations": [],
         }
     )
+
+
+def _three_file_public_task() -> PublicTaskView:
+    contents = {
+        "patients.csv": "patient_id\nP001\n",
+        "visits.csv": "patient_id,value\nP001,10\n",
+        "exclusions.csv": "patient_id,effective_date\n",
+    }
+    return PublicTaskView(
+        task_id="three_file_test",
+        prompt="Read every supplied public CSV.",
+        data_files=list(contents),
+        data_contents=contents,
+        answer_schema={"type": "object"},
+    )
+
+
+def _read_all_files_code() -> str:
+    return """import csv
+import json
+
+with open("inputs/patients.csv", encoding="utf-8") as handle:
+    patients = list(csv.DictReader(handle))
+with open("inputs/visits.csv", encoding="utf-8") as handle:
+    visits = list(csv.DictReader(handle))
+with open("inputs/exclusions.csv", encoding="utf-8") as handle:
+    exclusions = list(csv.DictReader(handle))
+print(json.dumps({
+    "status": "completed",
+    "answer": "read all public inputs",
+    "key_results": {"files_read": 3},
+    "limitations": []
+}))
+"""
 
 
 def test_public_task_view_excludes_private_grading_fields(task) -> None:
@@ -197,6 +233,28 @@ def test_one_shot_invalid_json_is_recorded_without_retry(
     assert outcome.generated_script_count == 1
 
 
+def test_one_shot_prompt_paths_are_usable_for_every_public_input(
+    tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    attempt = tmp_path / "attempt"
+    public = stage_public_task(_three_file_public_task(), attempt)
+    model = ScriptedRoleModel({"one_shot_code": [_read_all_files_code()]})
+
+    outcome = run_one_shot_code(
+        public=public,
+        model=model,
+        run_directory=attempt,
+        config=config,
+    )
+
+    prompt = model.calls[0].messages[1]["content"]
+    assert outcome.status == "completed"
+    assert outcome.candidate["key_results"] == {"files_read": 3}
+    for path in public.data_files:
+        assert path.startswith("inputs/")
+        assert path in prompt
+
+
 def test_staging_and_python_policy_exclude_private_files(task, tmp_path: Path) -> None:
     attempt = tmp_path / "attempt"
     public = stage_public_task(task.public, attempt)
@@ -209,8 +267,9 @@ def test_staging_and_python_policy_exclude_private_files(task, tmp_path: Path) -
     result = LocalPythonRunner().run(
         code=f"print(open({str(private_reference)!r}).read())\n",
         goal_directory=attempt / "execution",
-        allowed_files=[Path(path) for path in public.data_files],
+        allowed_files=[(attempt / path).resolve() for path in public.data_files],
         version=1,
+        working_directory=attempt,
     )
     assert not result.success
     assert "not staged" in (result.error or "")
@@ -317,6 +376,59 @@ def test_agent_messages_and_log_never_contain_private_ground_truth(
     assert {call.role for call in model.calls} == {"planner", "executor", "verifier"}
 
 
+def test_agent_generated_python_receives_usable_relative_public_paths(
+    tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    attempt = tmp_path / "attempt"
+    public = stage_public_task(_three_file_public_task(), attempt)
+    plan = json.dumps(
+        {
+            "scientific_objective": "Read all public inputs.",
+            "goals": [
+                {
+                    "goal_id": "read_inputs",
+                    "objective": "Read every supplied public CSV.",
+                    "required_outputs": ["files_read"],
+                    "constraints": [],
+                    "success_criteria": ["All three files are read."],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    strategy = json.dumps(
+        {
+            "strategy": "generated_python",
+            "capability_name": "profile_table",
+            "arguments": {"file_path": "inputs/patients.csv"},
+            "concise_reason": "Generated code is required.",
+        }
+    )
+    verifier = '{"decision":"PASS","feedback":"All inputs were read."}'
+    model = ScriptedRoleModel(
+        {
+            "planner": [plan],
+            "executor": [strategy, _read_all_files_code()],
+            "verifier": [verifier],
+        }
+    )
+
+    outcome = run_agent(
+        public=public,
+        model=model,
+        run_directory=attempt,
+        config=config,
+    )
+
+    code_call = [call for call in model.calls if call.role == "executor"][1]
+    assert outcome.status == "completed"
+    for path in public.data_files:
+        assert path in code_call.messages[1]["content"]
+        assert str((attempt / path).resolve()) not in code_call.messages[1]["content"]
+    workflow_log = (attempt / "agent_run/workflow.log").read_text(encoding="utf-8")
+    assert "Normalized generated_python capability_name" in workflow_log
+
+
 def test_failed_agent_call_does_not_leave_empty_agent_run(
     task, tmp_path: Path, config: BenchmarkConfig
 ) -> None:
@@ -387,3 +499,96 @@ def test_orchestrator_isolates_attempts_persists_rows_and_summarizes_offline(
 def test_benchmark_runs_directory_is_gitignored() -> None:
     gitignore = (DEFAULT_TASKS_ROOT.parent / ".gitignore").read_text(encoding="utf-8")
     assert "benchmark_runs/" in gitignore.splitlines()
+
+
+class _TransportFailureModel:
+    def generate(self, *, role, messages):
+        del role, messages
+        error_type = type("APIConnectionError", (Exception,), {})
+        raise error_type("connection failed")
+
+
+def test_transport_failure_is_ungraded_infrastructure_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=["direct_answer"],
+        live=True,
+    )
+
+    summary, results = run_benchmark(
+        config=config,
+        output_root=tmp_path / "runs",
+        model_factory=lambda approach, public: _TransportFailureModel(),
+        project_root=tmp_path,
+    )
+
+    result = results[0]
+    output = capsys.readouterr().out
+    assert result.status == "infrastructure_error"
+    assert result.error_category == "transport_api"
+    assert result.exception_class == "APIConnectionError"
+    assert result.api_call_count == 1
+    assert result.wall_clock_latency >= 0
+    assert not result.graded
+    assert result.grader_score is None
+    assert result.grader_errors == []
+    assert "starting approach" in output
+    assert "calling model" in output
+    assert "grading skipped" in output
+    grade_path = (
+        tmp_path / summary.results_path
+    ).parent / "direct_answer/successive_difference_smoke/repeat_001/grade.json"
+    assert json.loads(grade_path.read_text(encoding="utf-8"))["graded"] is False
+
+
+def test_live_progress_reports_successful_model_and_grading_stages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=["direct_answer"],
+        live=True,
+    )
+
+    run_benchmark(
+        config=config,
+        output_root=tmp_path / "runs",
+        model_factory=lambda approach, public: ScriptedRoleModel(
+            {"direct_answer": [_final(2.0)]}
+        ),
+        project_root=tmp_path,
+    )
+
+    output = capsys.readouterr().out
+    assert "[1/1] direct_answer — starting approach" in output
+    assert "model call 1 (direct_answer) — calling model" in output
+    assert "model call 1 (direct_answer) — completed" in output
+    assert "grading candidate" in output
+    assert "grading completed" in output
+
+
+@pytest.mark.parametrize(
+    ("approaches", "scope"),
+    [
+        (["direct_answer", "one_shot_code", "agent"], "three_way"),
+        (["agent"], "agent_only"),
+        (["direct_answer", "one_shot_code"], "direct_answer-vs-one_shot_code"),
+    ],
+)
+def test_benchmark_run_id_identifies_task_and_scope(approaches, scope: str) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=approaches,
+    )
+
+    run_id = build_benchmark_run_id(config, timestamp="20260715T120000Z")
+
+    assert benchmark_scope_label(config) == scope
+    assert run_id == (
+        f"benchmark__successive_difference_smoke__{scope}__20260715T120000Z"
+    )

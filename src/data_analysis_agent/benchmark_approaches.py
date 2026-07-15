@@ -24,6 +24,7 @@ from data_analysis_agent.python_runner import LocalPythonRunner
 from data_analysis_agent.state import AgentState
 
 ModelFactory = Callable[[Approach, PublicTaskView], RoleModel]
+ProgressCallback = Callable[[str], None]
 
 DIRECT_SYSTEM_PROMPT = """Solve the supplied data-analysis task directly.
 Return exactly one JSON object matching the public answer schema. Do not return
@@ -123,8 +124,66 @@ def _usage(recorder: RecordingRoleModel) -> tuple[int | None, int | None, int | 
     )
 
 
+def _call_counts(recorder: RecordingRoleModel) -> tuple[int, int]:
+    return (
+        sum(exchange.api_request_count for exchange in recorder.exchanges),
+        sum(exchange.transport_retry_count for exchange in recorder.exchanges),
+    )
+
+
+def _model_observer(progress: ProgressCallback | None):
+    if progress is None:
+        return None
+
+    def observe(
+        phase: str,
+        role: str,
+        call_number: int,
+        elapsed: float,
+        error: str | None,
+    ) -> None:
+        label = f"model call {call_number} ({role})"
+        if phase == "start":
+            progress(f"{label} — calling model...")
+        elif error:
+            progress(f"{label} — failed after {elapsed:.1f}s")
+        else:
+            progress(f"{label} — completed in {elapsed:.1f}s")
+
+    return observe
+
+
+def _infrastructure_error(exception: Exception) -> bool:
+    name = type(exception).__name__
+    return name in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+    } or (name == "InternalServerError")
+
+
 def _save_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _resolved_public_files(public: PublicTaskView, run_directory: Path) -> list[Path]:
+    input_root = (run_directory / "inputs").resolve()
+    resolved: list[Path] = []
+    for supplied in public.data_files:
+        relative = Path(supplied)
+        candidate = (run_directory / relative).resolve()
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or relative.parts[0] != "inputs"
+            or input_root not in candidate.parents
+            or not candidate.is_file()
+        ):
+            raise ValueError(f"Invalid staged public input path: {supplied}")
+        resolved.append(candidate)
+    return resolved
 
 
 def run_direct_answer(
@@ -133,6 +192,7 @@ def run_direct_answer(
     model: RoleModel,
     run_directory: Path,
     config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Make exactly one model call and perform no execution or repair."""
     messages = build_direct_answer_messages(public)
@@ -145,8 +205,9 @@ def run_direct_answer(
                 f"configured {config.direct_answer_max_input_chars}-character limit"
             ),
         )
-    recorder = RecordingRoleModel(model)
+    recorder = RecordingRoleModel(model, _model_observer(progress))
     not_applicable_reason = None
+    exception_class = None
     try:
         raw = recorder.generate(role="direct_answer", messages=messages)
         (run_directory / "raw_response.txt").write_text(raw, encoding="utf-8")
@@ -160,6 +221,7 @@ def run_direct_answer(
         error = f"{type(exception).__name__}: {exception}"
     except Exception as exception:
         candidate = None
+        exception_class = type(exception).__name__
         error = f"{type(exception).__name__}: {exception}"
         lowered = str(exception).lower()
         if "context" in lowered and any(
@@ -170,17 +232,23 @@ def run_direct_answer(
                 "provider rejected the complete input as context overflow"
             )
         else:
-            status = "error"
+            status = (
+                "infrastructure_error" if _infrastructure_error(exception) else "error"
+            )
             not_applicable_reason = None
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
+    api_call_count, retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
-        api_call_count=len(recorder.exchanges),
+        api_call_count=api_call_count,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
+        transport_retry_count=retry_count,
         run_error=error,
+        error_category=("transport_api" if status == "infrastructure_error" else None),
+        exception_class=(exception_class if status == "infrastructure_error" else None),
         not_applicable_reason=not_applicable_reason,
     )
 
@@ -191,21 +259,27 @@ def run_one_shot_code(
     model: RoleModel,
     run_directory: Path,
     config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Generate once, execute once, and never invoke repair or verification."""
-    recorder = RecordingRoleModel(model)
+    recorder = RecordingRoleModel(model, _model_observer(progress))
     execution = None
+    exception_class = None
     try:
         raw = recorder.generate(
             role="one_shot_code", messages=build_one_shot_code_messages(public)
         )
         (run_directory / "raw_code_response.txt").write_text(raw, encoding="utf-8")
         code = _extract_code(raw)
-        execution = LocalPythonRunner(timeout_seconds=config.timeout_seconds).run(
+        execution = LocalPythonRunner(
+            timeout_seconds=config.timeout_seconds,
+            progress_callback=progress,
+        ).run(
             code=code,
             goal_directory=run_directory / "execution",
-            allowed_files=[Path(path) for path in public.data_files],
+            allowed_files=_resolved_public_files(public, run_directory),
             version=1,
+            working_directory=run_directory,
         )
         if execution.success:
             candidate = execution.result
@@ -223,20 +297,25 @@ def run_one_shot_code(
             error = execution.error
     except Exception as exception:
         candidate = None
-        status = "error"
+        exception_class = type(exception).__name__
+        status = "infrastructure_error" if _infrastructure_error(exception) else "error"
         error = f"{type(exception).__name__}: {exception}"
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
+    api_call_count, retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
-        api_call_count=len(recorder.exchanges),
+        api_call_count=api_call_count,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
+        transport_retry_count=retry_count,
         execution_exit_code=execution.exit_code if execution else None,
         timed_out=execution.timed_out if execution else False,
         generated_script_count=1 if execution else 0,
         run_error=error,
+        error_category=("transport_api" if status == "infrastructure_error" else None),
+        exception_class=(exception_class if status == "infrastructure_error" else None),
     )
 
 
@@ -256,22 +335,33 @@ def run_agent(
     model: RoleModel,
     run_directory: Path,
     config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Invoke the existing full Planner/Executor/Verifier workflow from scratch."""
-    recorder = RecordingRoleModel(model)
+    recorder = RecordingRoleModel(model, _model_observer(progress))
     agent_directory = run_directory / "agent_run"
+    exception_class = None
     try:
+        if progress:
+            progress("agent workflow — starting...")
+        workflow_started = time.perf_counter()
+        staged_files = _resolved_public_files(public, run_directory)
         result = cast(
             AgentState,
             build_graph(
                 recorder,
                 DeterministicFinalOutputProvider(),
-                LocalPythonRunner(timeout_seconds=config.timeout_seconds),
+                LocalPythonRunner(
+                    timeout_seconds=config.timeout_seconds,
+                    progress_callback=progress,
+                ),
             ).invoke(
                 {
                     "question": public.prompt,
                     "file_paths": [Path(path).name for path in public.data_files],
-                    "staged_file_paths": list(public.data_files),
+                    "staged_file_paths": [str(path) for path in staged_files],
+                    "staged_file_display_paths": list(public.data_files),
+                    "execution_working_directory": str(run_directory.resolve()),
                     "input_context": _agent_input_context(public),
                     "run_directory": str(agent_directory),
                     "replan_count": 0,
@@ -284,6 +374,11 @@ def run_agent(
                 }
             ),
         )
+        if progress:
+            progress(
+                "agent workflow — completed in "
+                f"{time.perf_counter() - workflow_started:.1f}s"
+            )
         agent_directory.mkdir(parents=True, exist_ok=True)
         write_workflow_log(
             log_path=agent_directory / "workflow.log",
@@ -310,27 +405,37 @@ def run_agent(
         repairs = result.get("code_repair_count", 0)
         replans = result.get("replan_count", 0)
     except Exception as exception:
+        if progress:
+            progress(
+                "agent workflow — failed in "
+                f"{time.perf_counter() - workflow_started:.1f}s"
+            )
         candidate = None
-        status = "error"
+        exception_class = type(exception).__name__
+        status = "infrastructure_error" if _infrastructure_error(exception) else "error"
         error = f"{type(exception).__name__}: {exception}"
         exit_code = None
         timed_out = False
         decisions = []
         scripts = repairs = replans = 0
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
+    api_call_count, retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
-        api_call_count=len(recorder.exchanges),
+        api_call_count=api_call_count,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
+        transport_retry_count=retry_count,
         execution_exit_code=exit_code,
         timed_out=timed_out,
         generated_script_count=scripts,
         local_repair_count=repairs,
         global_replan_count=replans,
         run_error=error,
+        error_category=("transport_api" if status == "infrastructure_error" else None),
+        exception_class=(exception_class if status == "infrastructure_error" else None),
         verifier_decisions=decisions,
     )
 
@@ -342,21 +447,34 @@ def run_approach(
     model_factory: ModelFactory,
     run_directory: Path,
     config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Dispatch one clean attempt; private grading state is intentionally absent."""
     model = model_factory(approach, public)
     started = time.perf_counter()
     if approach == "direct_answer":
         outcome = run_direct_answer(
-            public=public, model=model, run_directory=run_directory, config=config
+            public=public,
+            model=model,
+            run_directory=run_directory,
+            config=config,
+            progress=progress,
         )
     elif approach == "one_shot_code":
         outcome = run_one_shot_code(
-            public=public, model=model, run_directory=run_directory, config=config
+            public=public,
+            model=model,
+            run_directory=run_directory,
+            config=config,
+            progress=progress,
         )
     else:
         outcome = run_agent(
-            public=public, model=model, run_directory=run_directory, config=config
+            public=public,
+            model=model,
+            run_directory=run_directory,
+            config=config,
+            progress=progress,
         )
     _save_json(run_directory / "outcome.json", outcome.model_dump(mode="json"))
     (run_directory / "latency.txt").write_text(

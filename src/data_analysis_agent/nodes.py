@@ -206,6 +206,13 @@ def _staged_paths(state: AgentState) -> list[Path]:
     return [Path(path).resolve() for path in supplied if Path(path).is_file()]
 
 
+def _staged_display_paths(state: AgentState) -> list[str]:
+    supplied = state.get("staged_file_display_paths")
+    if supplied is not None:
+        return list(supplied)
+    return [str(path) for path in _staged_paths(state)]
+
+
 def _registry(state: AgentState) -> TrustedToolRegistry:
     staged = _staged_paths(state)
     roots = list(dict.fromkeys(path.parent for path in staged)) or [Path.cwd()]
@@ -251,7 +258,7 @@ def _generated_result(
     first_version = max(existing_versions, default=0) + 1
     source_messages = build_python_generation_messages(
         current_goal=goal.model_dump(mode="json"),
-        staged_file_paths=[str(path) for path in staged_paths],
+        staged_file_paths=_staged_display_paths(state),
         completed_goal_results=list(state.get("completed_goal_results", [])),
         goal_directory=str(goal_directory),
     )
@@ -262,6 +269,11 @@ def _generated_result(
             goal_directory=goal_directory,
             allowed_files=staged_paths,
             version=first_version,
+            working_directory=(
+                Path(state["execution_working_directory"])
+                if state.get("execution_working_directory")
+                else None
+            ),
         )
     ]
     repair_count = 0
@@ -272,7 +284,7 @@ def _generated_result(
             stdout=executions[0].stdout,
             stderr=executions[0].stderr,
             error=executions[0].error,
-            staged_file_paths=[str(path) for path in staged_paths],
+            staged_file_paths=_staged_display_paths(state),
         )
         code_v2 = _extract_code(
             model.generate(role="executor", messages=repair_messages)
@@ -283,6 +295,11 @@ def _generated_result(
                 goal_directory=goal_directory,
                 allowed_files=staged_paths,
                 version=first_version + 1,
+                working_directory=(
+                    Path(state["execution_working_directory"])
+                    if state.get("execution_working_directory")
+                    else None
+                ),
             )
         )
         repair_count = 1
@@ -382,7 +399,7 @@ def make_executor_node(
                 else None
             ),
             capability_catalog=catalog,
-            staged_file_paths=[str(path) for path in _staged_paths(state)],
+            staged_file_paths=_staged_display_paths(state),
         )
         raw_strategy = model.generate(role="executor", messages=messages)
         try:
@@ -391,9 +408,24 @@ def make_executor_node(
             raise ExecutorOutputError(
                 "Executor did not return a valid ExecutionStrategy"
             ) from error
+        normalization_warnings: list[str] = []
+        if strategy.strategy == "generated_python" and (
+            strategy.capability_name is not None or strategy.arguments
+        ):
+            strategy = strategy.model_copy(
+                update={"capability_name": None, "arguments": {}}
+            )
+            normalization_warnings.append(
+                "Normalized generated_python capability_name to null and "
+                "arguments to {}."
+            )
         if strategy.strategy == "trusted_tool":
             if not strategy.capability_name:
                 raise ExecutorOutputError("trusted_tool requires capability_name")
+            if strategy.capability_name not in registry.names:
+                raise ExecutorOutputError(
+                    f"Unknown trusted capability: {strategy.capability_name}"
+                )
             tool_result = registry.execute(strategy.capability_name, strategy.arguments)
             goal = IntermediateGoal.model_validate(state["current_goal"])
             goal_result = GoalResult(
@@ -411,10 +443,6 @@ def make_executor_node(
             repair_increment = 0
             tool_increment = 1
         else:
-            if strategy.capability_name is not None or strategy.arguments:
-                raise ExecutorOutputError(
-                    "generated_python must not specify a capability or arguments"
-                )
             goal_result, execution_result, script_increment, repair_increment = (
                 _generated_result(
                     state=state,
@@ -433,6 +461,10 @@ def make_executor_node(
             "generated_script_count": state.get("generated_script_count", 0)
             + script_increment,
             "code_repair_count": state.get("code_repair_count", 0) + repair_increment,
+            "executor_warnings": [
+                *state.get("executor_warnings", []),
+                *normalization_warnings,
+            ],
             "trace": _trace(state, "executor"),
         }
 

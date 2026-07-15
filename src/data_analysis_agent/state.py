@@ -44,6 +44,9 @@ class AgentState(TypedDict, total=False):
     completed_goal_results: list[dict[str, JsonValue]]
     capability_catalog: list[dict[str, JsonValue]]
     staged_file_paths: list[str]
+    staged_file_display_paths: list[str]
+    execution_working_directory: str
+    executor_warnings: list[str]
     run_id: str
     run_directory: str
     trusted_tool_calls: int

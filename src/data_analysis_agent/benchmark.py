@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -40,6 +41,55 @@ ALL_APPROACHES: list[Approach] = ["direct_answer", "one_shot_code", "agent"]
 
 class BenchmarkError(ValueError):
     """Raised for invalid orchestration settings or benchmark output failures."""
+
+
+def _slug(value: str, *, limit: int = 48) -> str:
+    """Create a readable, filesystem-safe label without opaque identifiers."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
+    return (slug or "unnamed")[:limit].rstrip("-._")
+
+
+def benchmark_scope_label(config: BenchmarkConfig) -> str:
+    """Describe whether this is a single, three-way, or partial comparison."""
+    if set(config.approaches) == set(ALL_APPROACHES):
+        return "three_way"
+    if len(config.approaches) == 1:
+        return f"{config.approaches[0]}_only"
+    return "-vs-".join(config.approaches)
+
+
+def build_benchmark_run_id(
+    config: BenchmarkConfig, *, timestamp: str | None = None
+) -> str:
+    """Build a directory name that identifies tasks and comparison scope."""
+    if len(config.task_ids) == 1:
+        task_label = _slug(config.task_ids[0])
+    else:
+        task_names = "-and-".join(
+            _slug(task_id, limit=32) for task_id in config.task_ids
+        )
+        task_label = f"{len(config.task_ids)}_tasks--{task_names}"
+        if len(task_label) > 120:
+            task_label = f"{len(config.task_ids)}_tasks"
+    timestamp = timestamp or datetime.now(UTC).strftime("%Y-%m-%d_%H-%M-%SZ")
+    return f"benchmark__{task_label}__{benchmark_scope_label(config)}__{timestamp}"
+
+
+def _create_benchmark_run_directory(
+    output_root: Path, config: BenchmarkConfig
+) -> tuple[str, Path]:
+    """Reserve a readable run directory, adding an ordinal only on collision."""
+    base_id = build_benchmark_run_id(config)
+    ordinal = 1
+    while True:
+        run_id = base_id if ordinal == 1 else f"{base_id}__run_{ordinal:02d}"
+        run_root = output_root / run_id
+        try:
+            run_root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            ordinal += 1
+            continue
+        return run_id, run_root
 
 
 def _offline_model_factory(approach: Approach, public: PublicTaskView) -> RoleModel:
@@ -201,9 +251,7 @@ def run_benchmark(
     project_root: Path = PROJECT_ROOT,
 ) -> tuple[BenchmarkSummary, list[BenchmarkResult]]:
     """Run all configured approaches independently and grade externally."""
-    run_id = "benchmark_" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
-    run_root = output_root / run_id
-    run_root.mkdir(parents=True, exist_ok=False)
+    run_id, run_root = _create_benchmark_run_directory(output_root, config)
     (run_root / "config.json").write_text(
         config.model_dump_json(indent=2), encoding="utf-8"
     )
@@ -212,11 +260,21 @@ def run_benchmark(
     )
     results: list[BenchmarkResult] = []
     results_path = run_root / "results.jsonl"
+    total_attempts = len(config.task_ids) * config.repeats * len(config.approaches)
+    attempt_number = 0
 
     for task_id in config.task_ids:
         task = load_benchmark_task(tasks_root, task_id)
         for repeat_index in range(1, config.repeats + 1):
             for approach in config.approaches:
+                attempt_number += 1
+                prefix = f"[{attempt_number}/{total_attempts}] {approach}"
+
+                def progress(message: str, *, _prefix: str = prefix) -> None:
+                    if config.live:
+                        print(f"{_prefix} — {message}", flush=True)
+
+                progress("starting approach...")
                 attempt_directory = (
                     run_root / approach / task_id / f"repeat_{repeat_index:03d}"
                 )
@@ -229,18 +287,38 @@ def run_benchmark(
                     model_factory=factory,
                     run_directory=attempt_directory,
                     config=config,
+                    progress=progress if config.live else None,
                 )
                 latency = time.perf_counter() - started
-                grade = grade_candidate(
-                    outcome.candidate,
-                    task.private,
-                    candidate_error=outcome.run_error,
-                )
+                progress(f"approach finished in {latency:.1f}s")
+                if outcome.status == "infrastructure_error":
+                    grade = None
+                    progress("grading skipped — no candidate from infrastructure error")
+                else:
+                    progress("grading candidate...")
+                    grade_started = time.perf_counter()
+                    grade = grade_candidate(
+                        outcome.candidate,
+                        task.private,
+                        candidate_error=outcome.run_error,
+                    )
+                    progress(
+                        "grading completed in "
+                        f"{time.perf_counter() - grade_started:.1f}s"
+                    )
                 status = outcome.status
-                if status == "completed" and not grade.passed:
+                if status == "completed" and grade is not None and not grade.passed:
                     status = "wrong_answer"
+                grade_payload = (
+                    grade.model_dump(mode="json")
+                    if grade is not None
+                    else {
+                        "graded": False,
+                        "reason": "No candidate due to infrastructure error.",
+                    }
+                )
                 (attempt_directory / "grade.json").write_text(
-                    grade.model_dump_json(indent=2), encoding="utf-8"
+                    json.dumps(grade_payload, indent=2), encoding="utf-8"
                 )
                 result = BenchmarkResult(
                     task_id=task_id,
@@ -248,14 +326,20 @@ def run_benchmark(
                     repeat_index=repeat_index,
                     model=config.model,
                     status=status,
-                    graded_success=grade.passed,
-                    grader_score=grade.score,
-                    grader_errors=grade.errors,
-                    grader_details=grade.details,
+                    graded=grade is not None,
+                    graded_success=grade.passed if grade is not None else False,
+                    grader_score=grade.score if grade is not None else None,
+                    grader_errors=grade.errors if grade is not None else [],
+                    grader_details=(
+                        grade.details
+                        if grade is not None
+                        else {"error_category": "infrastructure_error"}
+                    ),
                     api_call_count=outcome.api_call_count,
                     prompt_tokens=outcome.prompt_tokens,
                     completion_tokens=outcome.completion_tokens,
                     total_tokens=outcome.total_tokens,
+                    transport_retry_count=outcome.transport_retry_count,
                     wall_clock_latency=latency,
                     execution_exit_code=outcome.execution_exit_code,
                     timed_out=outcome.timed_out,
@@ -265,6 +349,8 @@ def run_benchmark(
                     final_candidate_json=outcome.candidate,
                     artifact_directory=relative_to(attempt_directory, project_root),
                     run_error=outcome.run_error,
+                    error_category=outcome.error_category,
+                    exception_class=outcome.exception_class,
                     not_applicable_reason=outcome.not_applicable_reason,
                     verifier_decisions=outcome.verifier_decisions,
                 )
@@ -289,13 +375,22 @@ def format_benchmark_summary(
 ) -> str:
     """Print aggregate comparison without prompts, data, code, or private values."""
     task_label = ", ".join(summary.config.task_ids)
+    if set(summary.config.approaches) == set(ALL_APPROACHES):
+        mode_label = "three-way comparison"
+    elif len(summary.config.approaches) == 1:
+        mode_label = "single approach"
+    else:
+        mode_label = "selected approach comparison"
     lines = [
         "=" * 60,
         f"BENCHMARK — {task_label}",
         "=" * 60,
         "",
-        f"Model   : {summary.config.model}",
-        f"Repeats : {summary.config.repeats}",
+        f"Run ID     : {summary.benchmark_run_id}",
+        f"Mode       : {mode_label}",
+        f"Approaches : {', '.join(summary.config.approaches)}",
+        f"Model      : {summary.config.model}",
+        f"Repeats    : {summary.config.repeats}",
         "",
         "Approach       Passed   API calls   Tokens   Latency   Status",
         "-" * 64,
@@ -322,7 +417,10 @@ def format_benchmark_summary(
                 error
                 for result in results
                 if result.approach == approach
-                for error in result.grader_errors
+                for error in (
+                    result.grader_errors
+                    or ([result.run_error] if result.run_error else [])
+                )
             )
         )
         lines.append(f"{approach}:")

@@ -14,6 +14,7 @@ AttemptStatus = Literal[
     "invalid_json",
     "execution_failed",
     "timed_out",
+    "infrastructure_error",
     "not_applicable",
     "error",
 ]
@@ -89,12 +90,15 @@ class ApproachOutcome(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    transport_retry_count: int = 0
     execution_exit_code: int | None = None
     timed_out: bool = False
     generated_script_count: int = 0
     local_repair_count: int = 0
     global_replan_count: int = 0
     run_error: str | None = None
+    error_category: str | None = None
+    exception_class: str | None = None
     not_applicable_reason: str | None = None
     verifier_decisions: list[str] = Field(default_factory=list)
 
@@ -109,14 +113,16 @@ class BenchmarkResult(BaseModel):
     repeat_index: int
     model: str
     status: AttemptStatus
+    graded: bool
     graded_success: bool
-    grader_score: float
+    grader_score: float | None
     grader_errors: list[str]
     grader_details: dict[str, JsonValue]
     api_call_count: int
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    transport_retry_count: int
     wall_clock_latency: float
     execution_exit_code: int | None
     timed_out: bool
@@ -126,6 +132,8 @@ class BenchmarkResult(BaseModel):
     final_candidate_json: dict[str, JsonValue] | None
     artifact_directory: str
     run_error: str | None = None
+    error_category: str | None = None
+    exception_class: str | None = None
     not_applicable_reason: str | None = None
     verifier_decisions: list[str] = Field(default_factory=list)
 

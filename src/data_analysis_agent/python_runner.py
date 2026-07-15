@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,11 +39,6 @@ BANNED_CALLS = {
     "popen",
     "spawnl",
     "spawnlp",
-    "remove",
-    "unlink",
-    "rmdir",
-    "removedirs",
-    "rmtree",
     "getenv",
     "execl",
     "execle",
@@ -52,6 +48,13 @@ BANNED_CALLS = {
     "execve",
     "execvp",
     "execvpe",
+}
+FILE_MUTATION_CALLS = {
+    "remove",
+    "unlink",
+    "rmdir",
+    "removedirs",
+    "rmtree",
     "rename",
     "replace",
     "truncate",
@@ -112,7 +115,11 @@ def _within(path: Path, roots: list[Path]) -> bool:
 
 
 def validate_generated_code(
-    code: str, *, run_directory: Path, allowed_files: list[Path]
+    code: str,
+    *,
+    run_directory: Path,
+    allowed_files: list[Path],
+    working_directory: Path | None = None,
 ) -> None:
     """Reject obvious network, process, environment, deletion, and path access."""
     try:
@@ -121,9 +128,11 @@ def validate_generated_code(
         # Syntax errors are mechanical failures eligible for the single repair.
         return
     run_root = run_directory.resolve()
+    working_root = (working_directory or run_directory).resolve()
     allowed = {path.resolve() for path in allowed_files}
     standard_library = set(getattr(sys, "stdlib_module_names", ()))
     constants: dict[str, str] = {}
+    path_variables: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(
             node.value, ast.AST
@@ -134,6 +143,12 @@ def validate_generated_code(
                 for target in targets:
                     if isinstance(target, ast.Name):
                         constants[target.id] = value
+                        if (
+                            isinstance(node.value, ast.Call)
+                            and isinstance(node.value.func, ast.Name)
+                            and node.value.func.id == "Path"
+                        ):
+                            path_variables.add(target.id)
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -159,6 +174,22 @@ def validate_generated_code(
             call_name = node.func.attr
         if call_name in BANNED_CALLS:
             raise PythonPolicyError(f"Prohibited call: {call_name}")
+        if call_name in FILE_MUTATION_CALLS:
+            receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+            filesystem_receiver = (
+                not isinstance(node.func, ast.Attribute)
+                or (
+                    isinstance(receiver, ast.Name)
+                    and receiver.id in {"os", "shutil", *path_variables}
+                )
+                or (
+                    isinstance(receiver, ast.Call)
+                    and isinstance(receiver.func, ast.Name)
+                    and receiver.func.id == "Path"
+                )
+            )
+            if filesystem_receiver:
+                raise PythonPolicyError(f"Prohibited file operation: {call_name}")
 
         path_argument = node.args[0] if node.args else None
         if call_name == "open":
@@ -178,7 +209,7 @@ def validate_generated_code(
                 if keyword.arg == "mode":
                     mode = _literal_path(keyword.value, constants)
             if supplied is not None:
-                resolved = (run_root / supplied).resolve()
+                resolved = (working_root / supplied).resolve()
                 if any(flag in (mode or "r") for flag in "wax+"):
                     if not _within(resolved, [run_root]):
                         raise PythonPolicyError("Writing outside the run directory")
@@ -194,7 +225,7 @@ def validate_generated_code(
                 else _literal_path(path_argument, constants)
             )
             if supplied is not None:
-                resolved = (run_root / supplied).resolve()
+                resolved = (working_root / supplied).resolve()
                 if not _within(resolved, [run_root]):
                     raise PythonPolicyError("Writing outside the run directory")
             else:
@@ -207,7 +238,7 @@ def validate_generated_code(
                 else _literal_path(path_argument, constants)
             )
             if supplied is not None:
-                resolved = Path(supplied).resolve()
+                resolved = (working_root / supplied).resolve()
                 if resolved not in allowed:
                     raise PythonPolicyError("Reading a file that was not staged")
             else:
@@ -239,9 +270,16 @@ def _bounded_text(value: str | bytes | None, limit: int) -> str:
 class LocalPythonRunner:
     """Save and run generated code in a per-goal artifact directory."""
 
-    def __init__(self, *, timeout_seconds: float = 30, output_limit: int = 20_000):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 30,
+        output_limit: int = 20_000,
+        progress_callback: Callable[[str], None] | None = None,
+    ):
         self.timeout_seconds = timeout_seconds
         self.output_limit = output_limit
+        self.progress_callback = progress_callback
 
     def run(
         self,
@@ -250,11 +288,15 @@ class LocalPythonRunner:
         goal_directory: Path,
         allowed_files: list[Path],
         version: int,
+        working_directory: Path | None = None,
     ) -> PythonExecutionResult:
         goal_directory.mkdir(parents=True, exist_ok=True)
+        execution_directory = (working_directory or goal_directory).resolve()
         script_path = goal_directory / f"generated_code_v{version}.py"
         script_path.write_text(code, encoding="utf-8")
         started = time.perf_counter()
+        if self.progress_callback:
+            self.progress_callback("code execution — starting...")
         stdout = ""
         stderr = ""
         exit_code: int | None = None
@@ -267,6 +309,7 @@ class LocalPythonRunner:
                 code,
                 run_directory=goal_directory,
                 allowed_files=allowed_files,
+                working_directory=execution_directory,
             )
             environment = {
                 "PATH": os.environ.get("PATH", ""),
@@ -276,7 +319,7 @@ class LocalPythonRunner:
             }
             completed = subprocess.run(
                 [sys.executable, "-I", str(script_path)],
-                cwd=goal_directory,
+                cwd=execution_directory,
                 env=environment,
                 capture_output=True,
                 text=True,
@@ -309,6 +352,8 @@ class LocalPythonRunner:
             )
 
         duration = time.perf_counter() - started
+        if self.progress_callback:
+            self.progress_callback(f"code execution — completed in {duration:.1f}s")
         stdout_path = goal_directory / f"stdout_v{version}.txt"
         stderr_path = goal_directory / f"stderr_v{version}.txt"
         stdout_path.write_text(stdout, encoding="utf-8")

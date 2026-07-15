@@ -126,6 +126,8 @@ def _write_workflow_log(
         json.dumps(result.get("capability_catalog", []), indent=2),
         "Completed GoalResults:",
         json.dumps(result.get("completed_goal_results", []), indent=2),
+        "Executor warnings:",
+        json.dumps(result.get("executor_warnings", []), indent=2),
         f"Run artifact directory: {result.get('run_directory', 'none')}",
         "",
     ]
@@ -141,6 +143,8 @@ def _write_workflow_log(
                 exchange.response or "none",
                 f"Latency seconds: {exchange.latency_seconds:.6f}",
                 "Token usage: " + json.dumps(exchange.token_usage, ensure_ascii=False),
+                f"API requests: {exchange.api_request_count}",
+                f"Transport retries: {exchange.transport_retry_count}",
                 f"Error: {exchange.error or 'none'}",
                 "",
             ]

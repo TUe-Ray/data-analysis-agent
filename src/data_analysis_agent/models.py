@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 Role = Literal[
     "planner",
@@ -45,6 +46,8 @@ class ModelExchange:
     latency_seconds: float
     error: str | None = None
     token_usage: dict[str, int] | None = None
+    api_request_count: int = 1
+    transport_retry_count: int = 0
 
 
 class ScriptedRoleModel:
@@ -92,11 +95,15 @@ class NebiusRoleModel:
         self._top_p = top_p
         self._max_output_tokens = max_output_tokens
         self.last_token_usage: dict[str, int] | None = None
+        self.last_api_request_count = 0
+        self.last_transport_retry_count = 0
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Send a role-specific request through the OpenAI-compatible client."""
         del role
         self.last_token_usage = None
+        self.last_api_request_count = 0
+        self.last_transport_retry_count = 0
         arguments: dict[str, object] = {
             "model": self._model,
             "messages": messages,
@@ -107,7 +114,19 @@ class NebiusRoleModel:
             arguments["top_p"] = self._top_p
         if self._max_output_tokens is not None:
             arguments["max_tokens"] = self._max_output_tokens
-        response = self._client.chat.completions.create(**arguments)
+        for attempt in range(2):
+            self.last_api_request_count += 1
+            try:
+                response = self._client.chat.completions.create(**arguments)
+                break
+            except (APIConnectionError, APITimeoutError):
+                if attempt == 1:
+                    raise
+                self.last_transport_retry_count += 1
+            except APIStatusError as error:
+                if attempt == 1 or error.status_code < 500:
+                    raise
+                self.last_transport_retry_count += 1
         if response.usage is not None:
             self.last_token_usage = {
                 "prompt_tokens": response.usage.prompt_tokens,
@@ -123,37 +142,57 @@ class NebiusRoleModel:
 class RecordingRoleModel:
     """Record exact role messages and raw responses for local run logs."""
 
-    def __init__(self, model: RoleModel) -> None:
+    def __init__(
+        self,
+        model: RoleModel,
+        call_observer: Callable[[str, Role, int, float, str | None], None]
+        | None = None,
+    ) -> None:
         self._model = model
+        self._call_observer = call_observer
         self.exchanges: list[ModelExchange] = []
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Delegate generation and retain a secret-free exchange record."""
         started = time.perf_counter()
+        call_number = len(self.exchanges) + 1
+        if self._call_observer:
+            self._call_observer("start", role, call_number, 0.0, None)
         copied_messages = [dict(message) for message in messages]
         try:
             response = self._model.generate(role=role, messages=messages)
         except Exception as error:
+            elapsed = time.perf_counter() - started
+            error_text = f"{type(error).__name__}: {error}"
             self.exchanges.append(
                 ModelExchange(
                     role=role,
                     messages=copied_messages,
                     response=None,
-                    latency_seconds=time.perf_counter() - started,
-                    error=f"{type(error).__name__}: {error}",
+                    latency_seconds=elapsed,
+                    error=error_text,
                     token_usage=_token_usage(self._model),
+                    api_request_count=_request_count(self._model),
+                    transport_retry_count=_retry_count(self._model),
                 )
             )
+            if self._call_observer:
+                self._call_observer("end", role, call_number, elapsed, error_text)
             raise
+        elapsed = time.perf_counter() - started
         self.exchanges.append(
             ModelExchange(
                 role=role,
                 messages=copied_messages,
                 response=response,
-                latency_seconds=time.perf_counter() - started,
+                latency_seconds=elapsed,
                 token_usage=_token_usage(self._model),
+                api_request_count=_request_count(self._model),
+                transport_retry_count=_retry_count(self._model),
             )
         )
+        if self._call_observer:
+            self._call_observer("end", role, call_number, elapsed, None)
         return response
 
 
@@ -161,6 +200,16 @@ def _token_usage(model: RoleModel) -> dict[str, int] | None:
     """Snapshot optional provider usage without requiring it from fake models."""
     usage = getattr(model, "last_token_usage", None)
     return dict(usage) if isinstance(usage, dict) else None
+
+
+def _request_count(model: RoleModel) -> int:
+    value = getattr(model, "last_api_request_count", 1)
+    return value if isinstance(value, int) and value > 0 else 1
+
+
+def _retry_count(model: RoleModel) -> int:
+    value = getattr(model, "last_transport_retry_count", 0)
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 def build_scripted_model(scenario: str) -> ScriptedRoleModel:

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6,7 +7,8 @@ import pytest
 from data_analysis_agent.demo import run_demo
 from data_analysis_agent.final_output import DeterministicFinalOutputProvider
 from data_analysis_agent.graph import build_graph
-from data_analysis_agent.models import build_scripted_model
+from data_analysis_agent.models import ScriptedRoleModel, build_scripted_model
+from data_analysis_agent.nodes import ExecutorOutputError
 from data_analysis_agent.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
@@ -125,3 +127,103 @@ def test_structured_verifier_context_excludes_raw_input_and_role_history(
         assert EXECUTOR_SYSTEM_PROMPT not in context
     assert executor_calls[0].messages[0]["content"] == EXECUTOR_SYSTEM_PROMPT
     assert "Available capability catalog:" in executor_calls[0].messages[1]["content"]
+
+
+def _strategy_test_model(strategy: dict[str, object]) -> ScriptedRoleModel:
+    plan = json.dumps(
+        {
+            "scientific_objective": "Compute one generated result.",
+            "goals": [
+                {
+                    "goal_id": "compute",
+                    "objective": "Compute one generated result.",
+                    "required_outputs": ["value"],
+                    "constraints": [],
+                    "success_criteria": ["A value is returned."],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    return ScriptedRoleModel(
+        {
+            "planner": [plan],
+            "executor": [json.dumps(strategy), "print('{\"value\": 2.0}')\n"],
+            "verifier": ['{"decision":"PASS","feedback":"Value returned."}'],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("capability_name", "arguments", "warning_expected"),
+    [
+        (None, {}, False),
+        ("profile_table", {}, True),
+        (None, {"file_path": "inputs/data.csv"}, True),
+        ("inspect_file", {"file_path": "inputs/data.csv"}, True),
+    ],
+)
+def test_generated_python_strategy_fields_normalize_and_continue(
+    tmp_path: Path,
+    capability_name: str | None,
+    arguments: dict[str, str],
+    warning_expected: bool,
+) -> None:
+    model = _strategy_test_model(
+        {
+            "strategy": "generated_python",
+            "capability_name": capability_name,
+            "arguments": arguments,
+            "concise_reason": "Generated code is required.",
+        }
+    )
+
+    result = build_graph(model).invoke(
+        {
+            "question": "Compute one value.",
+            "file_paths": [],
+            "staged_file_paths": [],
+            "input_context": "No input files.",
+            "run_directory": str(tmp_path / "run"),
+            "replan_count": 0,
+            "max_replans": 1,
+            "trace": [],
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["current_strategy"]["capability_name"] is None
+    assert result["current_strategy"]["arguments"] == {}
+    assert bool(result.get("executor_warnings")) is warning_expected
+    assert [call.role for call in model.calls].count("executor") == 2
+
+
+@pytest.mark.parametrize(
+    ("capability_name", "message"),
+    [(None, "requires capability_name"), ("unknown_tool", "Unknown trusted")],
+)
+def test_invalid_trusted_tool_strategy_still_fails(
+    tmp_path: Path, capability_name: str | None, message: str
+) -> None:
+    model = _strategy_test_model(
+        {
+            "strategy": "trusted_tool",
+            "capability_name": capability_name,
+            "arguments": {},
+            "concise_reason": "Use a trusted tool.",
+        }
+    )
+
+    with pytest.raises(ExecutorOutputError, match=message):
+        build_graph(model).invoke(
+            {
+                "question": "Compute one value.",
+                "file_paths": [],
+                "staged_file_paths": [],
+                "input_context": "No input files.",
+                "run_directory": str(tmp_path / "run"),
+                "replan_count": 0,
+                "max_replans": 1,
+                "trace": [],
+            }
+        )
