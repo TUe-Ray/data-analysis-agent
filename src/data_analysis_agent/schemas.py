@@ -1,8 +1,69 @@
-"""Structured verifier and final-answer outputs for Prototype V0."""
+"""Structured workflow, execution, verifier, and final-answer outputs."""
 
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+
+
+class IntermediateGoal(BaseModel):
+    """One implementation-agnostic scientific objective in an ordered plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal_id: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    required_outputs: list[str]
+    constraints: list[str]
+    success_criteria: list[str]
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class HighLevelPlan(BaseModel):
+    """The Planner's global scientific objective and ordered goals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scientific_objective: str = Field(min_length=1)
+    goals: list[IntermediateGoal] = Field(min_length=1)
+
+
+class ExecutionStrategy(BaseModel):
+    """The Executor's concise local capability decision for one goal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal["trusted_tool", "generated_python"]
+    capability_name: str | None = None
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    concise_reason: str = Field(min_length=1)
+
+
+class ToolExecutionResult(BaseModel):
+    """Validated envelope returned for every trusted-tool invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    tool_name: str
+    output: dict[str, JsonValue]
+    warnings: list[str]
+    error: str | None = None
+    duration_seconds: float | None = None
+
+
+class GoalResult(BaseModel):
+    """Factual result retained after executing one intermediate goal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal_id: str
+    success: bool
+    strategy: Literal["trusted_tool", "generated_python"]
+    capability_name: str | None = None
+    result: dict[str, JsonValue]
+    warnings: list[str]
+    error: str | None = None
+    artifact_paths: list[str]
 
 
 class VerificationOutput(BaseModel):

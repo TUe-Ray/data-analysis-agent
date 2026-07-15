@@ -1,11 +1,11 @@
-"""Minimal shared state for the Prototype V0 graph."""
+"""Shared state for the bounded goal-driven analysis graph."""
 
 from typing import Literal, TypedDict
 
 from pydantic import JsonValue
 
 
-class IterationRecord(TypedDict):
+class IterationRecord(TypedDict, total=False):
     """Public outputs from one Planner/Executor/Verifier iteration."""
 
     iteration: int
@@ -14,6 +14,9 @@ class IterationRecord(TypedDict):
     verification_decision: Literal["PASS", "REPLAN"]
     verification_feedback: str
     route: str
+    goal_id: str
+    strategy: str
+    capability_name: str | None
 
 
 class OutputValidationRecord(TypedDict):
@@ -32,6 +35,20 @@ class AgentState(TypedDict, total=False):
     file_paths: list[str]
     input_context: str
     plan: str
+    high_level_plan: dict[str, JsonValue]
+    structured_plan: bool
+    current_goal_index: int
+    current_goal: dict[str, JsonValue]
+    current_strategy: dict[str, JsonValue]
+    current_goal_result: dict[str, JsonValue]
+    completed_goal_results: list[dict[str, JsonValue]]
+    capability_catalog: list[dict[str, JsonValue]]
+    staged_file_paths: list[str]
+    run_id: str
+    run_directory: str
+    trusted_tool_calls: int
+    generated_script_count: int
+    code_repair_count: int
     execution_result: str
     verification_decision: Literal["PASS", "REPLAN"]
     verification_feedback: str

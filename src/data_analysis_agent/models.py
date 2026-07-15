@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
 from openai import OpenAI
@@ -138,6 +140,192 @@ class RecordingRoleModel:
 
 def build_scripted_model(scenario: str) -> ScriptedRoleModel:
     """Build one of the deterministic Prototype V0 demo scenarios."""
+    structured_statistics_plan = json.dumps(
+        {
+            "scientific_objective": (
+                "Compute the requested descriptive statistics without imputing "
+                "missing values."
+            ),
+            "goals": [
+                {
+                    "goal_id": "understand_input",
+                    "objective": (
+                        "Inspect the supplied table and identify usable numeric "
+                        "observations and missing values."
+                    ),
+                    "required_outputs": [
+                        "table shape",
+                        "value-column type",
+                        "missing-value count",
+                    ],
+                    "constraints": ["Do not modify the input file."],
+                    "success_criteria": [
+                        "The value column is identified.",
+                        "Missing values are reported.",
+                    ],
+                    "depends_on": [],
+                },
+                {
+                    "goal_id": "compute_statistics",
+                    "objective": (
+                        "Compute the arithmetic mean, sample standard error, and "
+                        "number of non-missing observations."
+                    ),
+                    "required_outputs": [
+                        "mean",
+                        "sample_standard_error",
+                        "n_observations",
+                    ],
+                    "constraints": [
+                        "Do not impute missing values.",
+                        "Use sample standard deviation with denominator n - 1.",
+                    ],
+                    "success_criteria": [
+                        "All requested values are present and finite."
+                    ],
+                    "depends_on": ["understand_input"],
+                },
+            ],
+        }
+    )
+    structured_python_plan = json.dumps(
+        {
+            "scientific_objective": (
+                "Compute the requested sequence statistic from non-missing "
+                "measurements."
+            ),
+            "goals": [
+                {
+                    "goal_id": "compute_successive_difference",
+                    "objective": (
+                        "Compute the mean absolute successive difference of the "
+                        "non-missing value sequence."
+                    ),
+                    "required_outputs": ["mean_absolute_successive_difference"],
+                    "constraints": [
+                        "Preserve input order.",
+                        "Do not impute missing values.",
+                    ],
+                    "success_criteria": ["The requested finite statistic is reported."],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    profile_strategy = json.dumps(
+        {
+            "strategy": "trusted_tool",
+            "capability_name": "profile_table",
+            "arguments": {
+                "file_path": "measurements_with_missing.csv",
+                "sample_rows": 5,
+            },
+            "concise_reason": (
+                "The trusted profiler directly reports table structure and missingness."
+            ),
+        }
+    )
+    statistics_strategy = json.dumps(
+        {
+            "strategy": "trusted_tool",
+            "capability_name": "compute_summary_statistics",
+            "arguments": {
+                "file_path": "measurements_with_missing.csv",
+                "column": "value",
+                "statistics": ["count", "mean", "sample_standard_error"],
+                "drop_missing": True,
+            },
+            "concise_reason": (
+                "The trusted summary tool directly supports all requested calculations."
+            ),
+        }
+    )
+    python_strategy = json.dumps(
+        {
+            "strategy": "generated_python",
+            "capability_name": None,
+            "arguments": {},
+            "concise_reason": "No trusted tool computes successive differences.",
+        }
+    )
+    data_path = (
+        Path(__file__).resolve().parents[2]
+        / "examples/data/measurements_with_missing.csv"
+    )
+    good_code = f"""import csv
+import json
+
+with open({str(data_path)!r}, encoding="utf-8") as handle:
+    values = [float(row["value"]) for row in csv.DictReader(handle) if row["value"]]
+differences = [abs(right - left) for left, right in zip(values, values[1:])]
+result = sum(differences) / len(differences)
+print(json.dumps({{"mean_absolute_successive_difference": result}}))
+"""
+    wrong_column_code = f"""import csv
+import json
+
+with open({str(data_path)!r}, encoding="utf-8") as handle:
+    values = [float(row["wrong_value"]) for row in csv.DictReader(handle)]
+print(json.dumps({{"mean_absolute_successive_difference": values[0]}}))
+"""
+    other_wrong_code = wrong_column_code.replace("wrong_value", "still_wrong")
+    pass_profile = (
+        '{"decision":"PASS","feedback":"The table structure, numeric value '
+        'column, and missingness are supported by the profile output."}'
+    )
+    pass_statistics = (
+        '{"decision":"PASS","feedback":"All requested statistics are present '
+        'and supported by the trusted tool output."}'
+    )
+    pass_python = (
+        '{"decision":"PASS","feedback":"The successful script produced the '
+        'requested sequence statistic without imputation."}'
+    )
+    fail_python = (
+        '{"decision":"REPLAN","feedback":"Generated Python failed and did not '
+        'produce the required output."}'
+    )
+
+    if scenario == "trusted-tools-success":
+        return ScriptedRoleModel(
+            {
+                "planner": [structured_statistics_plan],
+                "executor": [profile_strategy, statistics_strategy],
+                "verifier": [pass_profile, pass_statistics],
+            }
+        )
+    if scenario == "generated-python-success":
+        return ScriptedRoleModel(
+            {
+                "planner": [structured_python_plan],
+                "executor": [python_strategy, good_code],
+                "verifier": [pass_python],
+            }
+        )
+    if scenario == "generated-python-repair":
+        return ScriptedRoleModel(
+            {
+                "planner": [structured_python_plan],
+                "executor": [python_strategy, wrong_column_code, good_code],
+                "verifier": [pass_python],
+            }
+        )
+    if scenario == "generated-python-failure":
+        return ScriptedRoleModel(
+            {
+                "planner": [structured_python_plan, structured_python_plan],
+                "executor": [
+                    python_strategy,
+                    wrong_column_code,
+                    other_wrong_code,
+                    python_strategy,
+                    wrong_column_code,
+                    other_wrong_code,
+                ],
+                "verifier": [fail_python, fail_python],
+            }
+        )
+
     complete_plan = """1. Identify non-missing values.
 2. Calculate the arithmetic mean.
 3. Report the number of observations used."""

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from data_analysis_agent.final_output import (
     DeterministicFinalOutputProvider,
     FinalGenerationRequest,
+    OutputRepairRequest,
     ScriptedFinalOutputProvider,
     build_scripted_output_provider,
 )
@@ -64,6 +65,39 @@ def test_deterministic_generator_extracts_explicit_live_style_labels() -> None:
         "sample_standard_error": 1.291,
         "n_observations": 4,
     }
+
+
+def test_deterministic_repair_preserves_structured_approved_values() -> None:
+    provider = DeterministicFinalOutputProvider()
+    approved = json.dumps(
+        {
+            "completed_goal_results": [
+                {
+                    "goal_id": "compute",
+                    "success": True,
+                    "strategy": "generated_python",
+                    "capability_name": None,
+                    "result": {"custom_statistic": 2.0},
+                    "warnings": [],
+                    "error": None,
+                    "artifact_paths": ["generated_code_v1.py"],
+                }
+            ]
+        }
+    )
+
+    raw = provider.repair(
+        OutputRepairRequest(
+            invalid_raw_output="not json",
+            validation_error="invalid",
+            required_schema=FinalAnswer.model_json_schema(),
+            approved_execution_result=approved,
+        )
+    )
+
+    answer = FinalAnswer.model_validate_json(raw)
+    assert answer.key_results == {"custom_statistic": 2.0}
+    assert answer.answer.startswith("Completed 1 verified goal")
 
 
 @pytest.mark.parametrize(

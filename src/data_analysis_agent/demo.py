@@ -86,9 +86,19 @@ def _offline_inputs(scenario: str) -> tuple[Path, list[Path]]:
         "output-repair",
         "malformed-json",
         "output-failure",
+        "trusted-tools-success",
     }:
         return (
             PROJECT_ROOT / "examples/prompts/verifier_trap.txt",
+            [PROJECT_ROOT / "examples/data/measurements_with_missing.csv"],
+        )
+    if scenario in {
+        "generated-python-success",
+        "generated-python-repair",
+        "generated-python-failure",
+    }:
+        return (
+            PROJECT_ROOT / "examples/prompts/successive_difference.txt",
             [PROJECT_ROOT / "examples/data/measurements_with_missing.csv"],
         )
     raise DemoInputError(f"Unknown offline scenario: {scenario}")
@@ -116,6 +126,13 @@ def _write_workflow_log(
         f"Staged files: {', '.join(result['file_paths'])}",
         f"Staged input context:\n{result['input_context']}",
         f"Trace: {' -> '.join(result['trace'])}",
+        "Structured high-level plan:",
+        json.dumps(result.get("high_level_plan"), indent=2, ensure_ascii=False),
+        "Capability catalog:",
+        json.dumps(result.get("capability_catalog", []), indent=2),
+        "Completed GoalResults:",
+        json.dumps(result.get("completed_goal_results", []), indent=2),
+        f"Run artifact directory: {result.get('run_directory', 'none')}",
         "",
     ]
     for index, exchange in enumerate(exchanges, start=1):
@@ -203,6 +220,7 @@ def run_demo(
 
     question = _read_small_text_file(prompt_path).strip()
     staged_names, input_context = stage_input_files(file_paths)
+    staged_paths = [str(path.resolve()) for path in file_paths]
     recorder = RecordingRoleModel(model)
     result = cast(
         AgentState,
@@ -210,7 +228,9 @@ def run_demo(
             {
                 "question": question,
                 "file_paths": staged_names,
+                "staged_file_paths": staged_paths,
                 "input_context": input_context,
+                "run_directory": str(log_path.parent) if log_path else "",
                 "replan_count": 0,
                 "max_replans": max_replans,
                 "output_repair_count": 0,
@@ -245,6 +265,51 @@ def format_workflow_result(
         *[f"- {name}" for name in result["file_paths"]],
     ]
     for record in result.get("iteration_history", []):
+        goal_id = record.get("goal_id")
+        if goal_id:
+            plan = result.get("high_level_plan", {})
+            goals = plan.get("goals", []) if isinstance(plan, dict) else []
+            goal = next(
+                (
+                    item
+                    for item in goals
+                    if isinstance(item, dict) and item.get("goal_id") == goal_id
+                ),
+                {},
+            )
+            goal_number = next(
+                (
+                    index
+                    for index, item in enumerate(goals, start=1)
+                    if isinstance(item, dict) and item.get("goal_id") == goal_id
+                ),
+                record["iteration"],
+            )
+            capability = record.get("capability_name")
+            lines.extend(
+                [
+                    "",
+                    SUBDIVIDER,
+                    f"GOAL {goal_number} OF {len(goals)} — {goal_id}",
+                    SUBDIVIDER,
+                    "Objective:",
+                    str(goal.get("objective", "")),
+                    "",
+                    "Strategy:",
+                    (f"{record.get('strategy')} — {capability or ''}").rstrip(" —"),
+                    "",
+                    "Result summary:",
+                    record["execution_result"],
+                    "",
+                    "Verifier:",
+                    f"Decision : {record['verification_decision']}",
+                    f"Feedback : {record['verification_feedback']}",
+                    "",
+                    "Route:",
+                    record["route"],
+                ]
+            )
+            continue
         lines.extend(
             [
                 "",
@@ -304,11 +369,16 @@ def format_workflow_result(
             DIVIDER,
             f"Status       : {result['status']}",
             f"Replan count : {result['replan_count']}",
+            f"Goals completed : {len(result.get('completed_goal_results', []))}",
+            f"Trusted-tool calls : {result.get('trusted_tool_calls', 0)}",
+            f"Generated scripts : {result.get('generated_script_count', 0)}",
+            f"Code repairs : {result.get('code_repair_count', 0)}",
             "",
             "JSON:",
             result["final_answer"],
             "",
             f"Detailed log: {log_path}",
+            f"Run artifacts: {result.get('run_directory', log_path.parent)}",
         ]
     )
     return "\n".join(lines)
@@ -328,6 +398,10 @@ def build_demo_parser() -> argparse.ArgumentParser:
             "output-repair",
             "malformed-json",
             "output-failure",
+            "trusted-tools-success",
+            "generated-python-success",
+            "generated-python-repair",
+            "generated-python-failure",
         ),
         default="happy",
         help="Scripted scenario used in offline mode",

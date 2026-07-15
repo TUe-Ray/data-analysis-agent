@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
+
+from pydantic import JsonValue
 
 from data_analysis_agent.schemas import FinalAnswer
 from data_analysis_agent.state import IterationRecord
@@ -20,6 +22,7 @@ class FinalGenerationRequest:
     verifier_decision: str
     verifier_feedback: str
     iteration_history: list[IterationRecord]
+    completed_goal_results: list[dict[str, JsonValue]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -71,12 +74,67 @@ def _extract_key_results(approved_execution_result: str) -> dict[str, int | floa
     return results
 
 
-def _serialize_approved_result(approved_execution_result: str) -> str:
+def _approved_structured_values(
+    completed_goal_results: list[dict[str, JsonValue]],
+) -> tuple[dict[str, JsonValue], list[str]]:
+    """Copy numeric/script values from approved results without recalculation."""
+    key_results: dict[str, JsonValue] = {}
+    limitations: list[str] = []
+    for goal_result in completed_goal_results:
+        if not goal_result.get("success"):
+            continue
+        warnings = goal_result.get("warnings", [])
+        if isinstance(warnings, list):
+            limitations.extend(str(item) for item in warnings)
+        result = goal_result.get("result", {})
+        if not isinstance(result, dict):
+            continue
+        if goal_result.get("capability_name") == "compute_summary_statistics":
+            statistics_result = result.get("statistics", {})
+            if isinstance(statistics_result, dict):
+                for name, value in statistics_result.items():
+                    output_name = "n_observations" if name == "count" else name
+                    key_results[output_name] = value
+        elif goal_result.get("strategy") == "generated_python":
+            if "legacy_execution_result" not in result:
+                key_results.update(result)
+    return key_results, list(dict.fromkeys(limitations))
+
+
+def _serialize_approved_result(
+    approved_execution_result: str,
+    completed_goal_results: list[dict[str, JsonValue]] | None = None,
+) -> str:
+    goal_count = len(completed_goal_results or [])
+    structured_results, limitations = _approved_structured_values(
+        completed_goal_results or []
+    )
+    if not structured_results and not completed_goal_results:
+        try:
+            approved_object = json.loads(approved_execution_result)
+        except json.JSONDecodeError:
+            approved_object = None
+        if isinstance(approved_object, dict) and isinstance(
+            approved_object.get("completed_goal_results"), list
+        ):
+            goal_count = len(approved_object["completed_goal_results"])
+            structured_results, limitations = _approved_structured_values(
+                approved_object["completed_goal_results"]
+            )
+    if structured_results:
+        answer_text = (
+            f"Completed {goal_count} verified goal(s). "
+            f"Key results: {json.dumps(structured_results, ensure_ascii=False)}"
+        )
+        key_results = structured_results
+    else:
+        answer_text = approved_execution_result.strip()
+        key_results = _extract_key_results(approved_execution_result)
     answer = FinalAnswer(
         status="completed",
-        answer=approved_execution_result.strip(),
-        key_results=_extract_key_results(approved_execution_result),
-        limitations=[],
+        answer=answer_text,
+        key_results=key_results,
+        limitations=limitations,
     )
     return json.dumps(answer.model_dump(mode="json"), ensure_ascii=False, indent=2)
 
@@ -85,7 +143,10 @@ class DeterministicFinalOutputProvider:
     """Format approved content without asking a model to judge or recalculate it."""
 
     def generate(self, request: FinalGenerationRequest) -> str:
-        return _serialize_approved_result(request.approved_execution_result)
+        return _serialize_approved_result(
+            request.approved_execution_result,
+            request.completed_goal_results,
+        )
 
     def repair(self, request: OutputRepairRequest) -> str:
         return _serialize_approved_result(request.approved_execution_result)
@@ -116,7 +177,16 @@ class ScriptedFinalOutputProvider:
 def build_scripted_output_provider(scenario: str) -> FinalOutputProvider:
     """Build output behavior for deterministic offline demo scenarios."""
     deterministic = DeterministicFinalOutputProvider()
-    if scenario in {"happy", "replan", "max-replan", "valid-json"}:
+    if scenario in {
+        "happy",
+        "replan",
+        "max-replan",
+        "valid-json",
+        "trusted-tools-success",
+        "generated-python-success",
+        "generated-python-repair",
+        "generated-python-failure",
+    }:
         return deterministic
 
     repaired = json.dumps(

@@ -62,19 +62,61 @@ make api-check
 `api-check`, `demo-v0-live`, and the `verifier-eval-live` targets are the only
 commands that contact the live Nebius API.
 
-## Prototype V0
+## Goal-driven analysis workflow
 
-Prototype V0 is a minimal runnable LangGraph skeleton with separate Planner,
-Executor, Verifier, Final Answer Generator, Output Validator, and Output Repair
-nodes. Each role receives a separately constructed context; in particular, the
-Verifier receives only the question, staged input data, current plan, and
-execution result.
+The runnable LangGraph retains separate Planner, Executor, Verifier, Final
+Answer Generator, Output Validator, and Output Repair nodes. It now executes an
+ordered high-level plan one intermediate goal at a time:
+
+```text
+START -> Planner -> Select Current Goal -> Executor -> Verifier
+                 PASS + more goals -------^          |
+                 PASS + all goals -> Final Answer Generator
+                 REPLAN -> Planner
+```
+
+The Planner defines the global scientific objective, required outputs,
+constraints, success criteria, and dependencies. It does not select concrete
+tools or write implementation steps. The Executor receives one fixed goal and
+chooses its local implementation. The Verifier sees only goal-oriented factual
+context and decides `PASS` or `REPLAN`; it does not receive complete Planner or
+Executor histories.
 
 The Verifier returns validated `PASS` or `REPLAN` JSON. A passing result moves
 to JSON-only answer generation, while `REPLAN` loops to the Planner at most once
 by default. If the limit is exhausted, the graph returns an explicit
 `stopped_after_max_replans` failure object without claiming verification passed.
-The Executor is LLM-based and does not execute generated code.
+Runtime capability preference is:
+
+1. trusted built-in tools;
+2. generated Python fallback.
+
+The three trusted tools are:
+
+- `inspect_file`: inspects one explicitly staged CSV or UTF-8 text file. It
+  does not inspect directories, network resources, or binary scientific files.
+- `profile_table`: produces a bounded deterministic CSV profile, including
+  types, missingness, uniqueness, duplicates, numeric ranges, and a small
+  preview. It does not infer scientific meaning or select methods.
+- `compute_summary_statistics`: computes selected descriptive statistics for
+  one numeric CSV column. Sample standard deviation uses `n - 1`, sample
+  standard error is `sample_sd / sqrt(n)`, and fewer than two observations fail
+  when either sample quantity is requested. It never imputes silently.
+
+All trusted-tool inputs and outputs are Pydantic validated. File arguments are
+resolved and must match the current run's explicit staged-file allowlist.
+
+If no tool directly supports a goal, the Executor may generate Python using the
+standard library and installed `pandas`, `numpy`, or `scipy`. A conservative AST
+check rejects obvious network/process/environment/deletion operations and
+unstaged literal reads or out-of-run literal writes. Execution uses a minimal
+environment, an isolated per-goal working directory, a 30-second default
+timeout, and bounded stdout/stderr capture. One mechanical code-repair attempt
+is allowed.
+
+This runner is prototype defense in depth, not production-grade sandboxing or
+an OS security boundary. Do not run untrusted generated code in a sensitive
+environment.
 
 Run the deterministic offline scenarios without credentials or network access:
 
@@ -85,6 +127,10 @@ make demo-v0-max-replan
 make demo-v0-valid-json
 make demo-v0-output-repair
 make demo-v0-output-failure
+make demo-tools-success
+make demo-python-success
+make demo-python-repair
+make demo-python-failure
 ```
 
 The replan scenario uses the verifier-trap prompt to demonstrate recovery from
@@ -101,9 +147,33 @@ Nebius Token Factory:
 make demo-v0-live
 ```
 
-Each demo prints separate Planner/Executor/Verifier iterations. Complete model
-messages and raw responses are written under `runs/demo_<timestamp>/`; `runs/`
-is ignored by Git.
+Each demo prints separate goal executions and a final count of completed goals,
+trusted-tool calls, generated scripts, and repairs. Complete model exchanges,
+structured plans, factual execution results, validation details, and raw
+responses are written under `runs/demo_<timestamp>/workflow.log`.
+
+Generated code and outputs are retained under:
+
+```text
+runs/<run_id>/goals/<goal_id>/
+    generated_code_v1.py
+    generated_code_v2.py       # only after repair
+    stdout.txt
+    stderr.txt
+    execution_result.json
+    artifact_metadata.json
+    generated_outputs/
+```
+
+Versioned stdout, stderr, and execution records are also kept. `runs/` remains
+ignored by Git. Successful scripts are run artifacts for reproducibility,
+debugging, and auditability only: they are not registered, trusted, or reused
+across future runs.
+
+Future direction, not implemented here, is trusted tools, then reviewed and
+approved reusable recipes, then generated Python. A possible promotion lifecycle
+is generated script -> saved artifact -> candidate recipe -> reviewed recipe;
+there is currently no recipe registry or automatic promotion.
 
 ### JSON-only final output
 
@@ -188,13 +258,15 @@ reduce reliance on an LLM as judge.
 
 ## Current scope
 
-The project currently provides the V0 bounded verification loop, one bounded
-JSON-output repair, deterministic offline examples, a small live Verifier
-diagnostic suite, environment-based configuration, a minimal OpenAI-compatible
-Nebius client factory, and manual live connectivity/demo commands.
+The project currently provides goal-driven sequential execution, the bounded
+verification loop, one bounded local code repair, one bounded JSON-output
+repair, deterministic offline examples, a small live Verifier diagnostic suite,
+environment-based configuration, a minimal OpenAI-compatible Nebius client
+factory, and manual live connectivity/demo commands.
 
 ## Not implemented yet
 
-The following are intentionally deferred: Task Contract, EDA and schema
-resolution, generated-code execution, deterministic validators, Evidence Pack,
-advanced failure routing, persistence, and UI.
+The following are intentionally deferred: Task Contract, automatic EDA, schema
+resolution, reusable recipes, cross-run memory, deterministic scientific
+validators, Evidence Pack, advanced scheduling, production sandboxing,
+persistence, checkpointers, web/database integrations, and UI.

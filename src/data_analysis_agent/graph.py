@@ -20,16 +20,24 @@ from data_analysis_agent.nodes import (
     max_replan_failure_node,
     output_failure_node,
     output_validator_node,
+    select_current_goal_node,
 )
+from data_analysis_agent.schemas import HighLevelPlan
 from data_analysis_agent.state import AgentState
 
 
 def route_after_verification(
     state: AgentState,
-) -> Literal["planner", "final_answer_generator", "failure_finalizer"]:
+) -> Literal[
+    "planner", "select_current_goal", "final_answer_generator", "failure_finalizer"
+]:
     """Route validated decisions while enforcing the configured replan bound."""
     decision = state.get("verification_decision")
     if decision == "PASS":
+        if state.get("high_level_plan") is not None:
+            plan = HighLevelPlan.model_validate(state["high_level_plan"])
+            if state.get("current_goal_index", 0) < len(plan.goals):
+                return "select_current_goal"
         return "final_answer_generator"
     if decision == "REPLAN":
         if state.get("replan_count", 0) < state.get("max_replans", 1):
@@ -60,6 +68,7 @@ def build_graph(
     output_provider = output_provider or DeterministicFinalOutputProvider()
     workflow = StateGraph(AgentState)
     workflow.add_node("planner", make_planner_node(model))
+    workflow.add_node("select_current_goal", select_current_goal_node)
     workflow.add_node("executor", make_executor_node(model))
     workflow.add_node("verifier", make_verifier_node(model))
     workflow.add_node(
@@ -72,13 +81,15 @@ def build_graph(
     workflow.add_node("output_failure", output_failure_node)
 
     workflow.add_edge(START, "planner")
-    workflow.add_edge("planner", "executor")
+    workflow.add_edge("planner", "select_current_goal")
+    workflow.add_edge("select_current_goal", "executor")
     workflow.add_edge("executor", "verifier")
     workflow.add_conditional_edges(
         "verifier",
         route_after_verification,
         {
             "planner": "planner",
+            "select_current_goal": "select_current_goal",
             "final_answer_generator": "final_answer_generator",
             "failure_finalizer": "failure_finalizer",
         },
