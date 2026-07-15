@@ -71,7 +71,11 @@ class BenchmarkConfig(BaseModel):
     model: str
     temperature: float = 0.0
     top_p: float | None = None
-    max_output_tokens: int = Field(default=4096, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    planner_max_output_tokens: int | None = Field(default=None, gt=0)
+    executor_max_output_tokens: int | None = Field(default=None, gt=0)
+    verifier_max_output_tokens: int | None = Field(default=None, gt=0)
+    python_max_output_tokens: int | None = Field(default=None, gt=0)
     timeout_seconds: float = Field(default=30.0, gt=0)
     direct_answer_max_input_chars: int = Field(default=500_000, gt=0)
     max_replans: int = Field(default=1, ge=0)
@@ -95,6 +99,7 @@ class ApproachOutcome(BaseModel):
     completion_tokens: int | None = None
     total_tokens: int | None = None
     transport_retry_count: int = 0
+    response_retry_count: int = 0
     execution_exit_code: int | None = None
     timed_out: bool = False
     generated_script_count: int = 0
@@ -131,6 +136,7 @@ class BenchmarkResult(BaseModel):
     completion_tokens: int | None
     total_tokens: int | None
     transport_retry_count: int
+    response_retry_count: int = 0
     wall_clock_latency: float
     execution_exit_code: int | None
     timed_out: bool
@@ -162,6 +168,8 @@ class ApproachMetrics(BaseModel):
     code_execution_failure_count: int
     timeout_count: int
     average_api_calls: float
+    average_transport_retry_count: float = 0.0
+    average_response_retry_count: float = 0.0
     average_total_tokens: float | None
     average_latency: float
     average_generated_script_versions: float

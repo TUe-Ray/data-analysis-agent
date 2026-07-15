@@ -156,8 +156,13 @@ def _write_workflow_log(
                 "Token usage: " + json.dumps(exchange.token_usage, ensure_ascii=False),
                 f"API requests: {exchange.api_request_count}",
                 f"Transport retries: {exchange.transport_retry_count}",
+                f"Response retries: {exchange.response_retry_count}",
+                f"Purpose: {exchange.purpose or 'unknown'}",
+                f"Structured schema: {exchange.structured_schema_name or 'none'}",
                 f"Finish reason: {exchange.finish_reason or 'unknown'}",
                 f"Error: {exchange.error or 'none'}",
+                "Provider attempt diagnostics: "
+                + json.dumps(exchange.provider_attempts, ensure_ascii=False),
                 "",
             ]
         )

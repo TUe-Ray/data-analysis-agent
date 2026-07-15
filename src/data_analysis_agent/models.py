@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal, Protocol
 
@@ -45,6 +45,39 @@ class ModelCapabilityError(RuntimeError):
     """Raised when a configured model cannot enforce required structured output."""
 
 
+class ProviderResponseError(RuntimeError):
+    """Base class for usable-content failures after a successful API response."""
+
+
+class EmptyModelResponseError(ProviderResponseError):
+    """Raised when bounded retries cannot obtain final model content."""
+
+
+class ModelOutputLimitError(ProviderResponseError):
+    """Raised when a blank response ended because its output limit was reached."""
+
+
+class ModelRefusalError(ProviderResponseError):
+    """Raised when a provider reports a refusal instead of final content."""
+
+
+class MalformedModelResponseError(ProviderResponseError):
+    """Raised for a non-retryable incomplete provider response."""
+
+
+DEFAULT_ORDINARY_OUTPUT_TOKENS = 8192
+DEFAULT_PYTHON_OUTPUT_TOKENS = 32768
+DEFAULT_LEGACY_OUTPUT_TOKENS = 4096
+_PYTHON_SCHEMA_NAMES = frozenset(
+    {
+        "python_generation",
+        "python_repair",
+        "single_agent_python_generation",
+        "single_agent_python_repair",
+    }
+)
+
+
 @dataclass(frozen=True)
 class ModelCall:
     """One recorded scripted-model call, exposed for deterministic tests."""
@@ -66,7 +99,11 @@ class ModelExchange:
     token_usage: dict[str, int] | None = None
     api_request_count: int = 1
     transport_retry_count: int = 0
+    response_retry_count: int = 0
     finish_reason: str | None = None
+    purpose: str | None = None
+    structured_schema_name: str | None = None
+    provider_attempts: list[dict[str, object]] = field(default_factory=list)
 
 
 class ScriptedRoleModel:
@@ -163,21 +200,34 @@ class NebiusRoleModel:
         temperature: float | None = None,
         top_p: float | None = None,
         max_output_tokens: int | None = None,
+        planner_max_output_tokens: int | None = None,
+        executor_max_output_tokens: int | None = None,
+        verifier_max_output_tokens: int | None = None,
+        python_max_output_tokens: int | None = None,
     ) -> None:
         self._client = client
         self._model = model
         self._temperature = temperature
         self._top_p = top_p
         self._max_output_tokens = max_output_tokens
+        self._planner_max_output_tokens = planner_max_output_tokens
+        self._executor_max_output_tokens = executor_max_output_tokens
+        self._verifier_max_output_tokens = verifier_max_output_tokens
+        self._python_max_output_tokens = python_max_output_tokens
         self.last_token_usage: dict[str, int] | None = None
         self.last_api_request_count = 0
         self.last_transport_retry_count = 0
+        self.last_response_retry_count = 0
         self.last_finish_reason: str | None = None
+        self.last_provider_attempts: list[dict[str, object]] = []
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Send a role-specific request through the OpenAI-compatible client."""
-        del role
-        return self._request(messages=messages)
+        return self._request(
+            messages=messages,
+            role=role,
+            purpose=self._purpose(role=role, schema_name=None),
+        )
 
     def generate_structured(
         self,
@@ -188,7 +238,6 @@ class NebiusRoleModel:
         schema: dict[str, object],
     ) -> str:
         """Require strict provider-native JSON Schema for executable responses."""
-        del role
         if self._json_schema_capabilities.get(self._model) is False:
             raise ModelCapabilityError(
                 "model_capability_error: model "
@@ -206,6 +255,8 @@ class NebiusRoleModel:
             content = self._request(
                 messages=messages,
                 response_format=response_format,
+                role=role,
+                purpose=self._purpose(role=role, schema_name=schema_name),
             )
         except APIStatusError as error:
             if error.status_code in {400, 422}:
@@ -227,12 +278,16 @@ class NebiusRoleModel:
         self,
         *,
         messages: list[dict[str, str]],
+        role: Role,
+        purpose: str,
         response_format: dict[str, object] | None = None,
     ) -> str:
         self.last_token_usage = None
         self.last_api_request_count = 0
         self.last_transport_retry_count = 0
+        self.last_response_retry_count = 0
         self.last_finish_reason = None
+        self.last_provider_attempts = []
         arguments: dict[str, object] = {
             "model": self._model,
             "messages": messages,
@@ -241,38 +296,233 @@ class NebiusRoleModel:
             arguments["temperature"] = self._temperature
         if self._top_p is not None:
             arguments["top_p"] = self._top_p
-        if self._max_output_tokens is not None:
-            arguments["max_tokens"] = self._max_output_tokens
+        max_output_tokens = self._output_token_limit(role=role, purpose=purpose)
+        arguments["max_tokens"] = max_output_tokens
         if response_format is not None:
             arguments["response_format"] = response_format
-        for attempt in range(2):
+        last_diagnostic: dict[str, object] = {}
+        for response_attempt in range(3):
+            response = self._request_with_transport(
+                arguments=arguments,
+                response_attempt=response_attempt,
+                purpose=purpose,
+                max_output_tokens=max_output_tokens,
+            )
+            diagnostic, content, exception_type = self._inspect_response(
+                response=response,
+                response_attempt=response_attempt,
+                purpose=purpose,
+                max_output_tokens=max_output_tokens,
+            )
+            self.last_provider_attempts.append(diagnostic)
+            self._accumulate_usage(response)
+            finish_reason = diagnostic.get("finish_reason")
+            self.last_finish_reason = (
+                str(finish_reason) if isinstance(finish_reason, str) else None
+            )
+            if content is not None:
+                return content
+            last_diagnostic = diagnostic
+            if exception_type is not EmptyModelResponseError:
+                raise exception_type(self._response_error_message(diagnostic))
+            if response_attempt == 2:
+                raise EmptyModelResponseError(
+                    self._response_error_message(diagnostic, attempts=3)
+                )
+            self.last_response_retry_count += 1
+            time.sleep((0.5, 1.5)[response_attempt])
+        raise EmptyModelResponseError(self._response_error_message(last_diagnostic))
+
+    def _request_with_transport(
+        self,
+        *,
+        arguments: dict[str, object],
+        response_attempt: int,
+        purpose: str,
+        max_output_tokens: int,
+    ) -> object:
+        for transport_attempt in range(2):
             self.last_api_request_count += 1
             try:
-                response = self._client.chat.completions.create(**arguments)
-                break
-            except (APIConnectionError, APITimeoutError):
-                if attempt == 1:
+                return self._client.chat.completions.create(**arguments)
+            except (APIConnectionError, APITimeoutError) as error:
+                self.last_provider_attempts.append(
+                    self._transport_failure_diagnostic(
+                        error=error,
+                        response_attempt=response_attempt,
+                        transport_attempt=transport_attempt,
+                        purpose=purpose,
+                        max_output_tokens=max_output_tokens,
+                    )
+                )
+                if transport_attempt == 1:
                     raise
                 self.last_transport_retry_count += 1
             except APIStatusError as error:
-                if attempt == 1 or error.status_code < 500:
+                self.last_provider_attempts.append(
+                    self._transport_failure_diagnostic(
+                        error=error,
+                        response_attempt=response_attempt,
+                        transport_attempt=transport_attempt,
+                        purpose=purpose,
+                        max_output_tokens=max_output_tokens,
+                    )
+                )
+                if transport_attempt == 1 or error.status_code < 500:
                     raise
                 self.last_transport_retry_count += 1
-        if response.usage is not None:
-            self.last_token_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        choice = response.choices[0]
-        finish_reason = getattr(choice, "finish_reason", None)
-        self.last_finish_reason = (
-            str(finish_reason) if finish_reason is not None else None
+        raise AssertionError("transport retry loop exited without a response")
+
+    def _purpose(self, *, role: Role, schema_name: str | None) -> str:
+        if schema_name is not None:
+            return schema_name
+        return "executor_strategy" if role == "executor" else role
+
+    def _output_token_limit(self, *, role: Role, purpose: str) -> int:
+        if purpose in _PYTHON_SCHEMA_NAMES:
+            return self._python_max_output_tokens or DEFAULT_PYTHON_OUTPUT_TOKENS
+        if role == "planner":
+            return (
+                self._planner_max_output_tokens
+                or self._max_output_tokens
+                or DEFAULT_ORDINARY_OUTPUT_TOKENS
+            )
+        if role == "executor":
+            return (
+                self._executor_max_output_tokens
+                or self._max_output_tokens
+                or DEFAULT_ORDINARY_OUTPUT_TOKENS
+            )
+        if role == "verifier":
+            return (
+                self._verifier_max_output_tokens
+                or self._max_output_tokens
+                or DEFAULT_ORDINARY_OUTPUT_TOKENS
+            )
+        return self._max_output_tokens or DEFAULT_LEGACY_OUTPUT_TOKENS
+
+    def _inspect_response(
+        self,
+        *,
+        response: object,
+        response_attempt: int,
+        purpose: str,
+        max_output_tokens: int,
+    ) -> tuple[dict[str, object], str | None, type[ProviderResponseError]]:
+        choices = getattr(response, "choices", None)
+        choice_count = len(choices) if isinstance(choices, (list, tuple)) else 0
+        choice = choices[0] if choice_count else None
+        message = getattr(choice, "message", None) if choice is not None else None
+        content = getattr(message, "content", None) if message is not None else None
+        content_text = content if isinstance(content, str) else None
+        stripped = content_text.strip() if content_text is not None else ""
+        finish_reason = getattr(choice, "finish_reason", None) if choice else None
+        finish_reason_text = (
+            str(finish_reason) if isinstance(finish_reason, str) else None
         )
-        content = choice.message.content
-        if not content:
-            raise RuntimeError("Nebius returned an empty model response")
-        return content
+        refusal = getattr(message, "refusal", None) if message is not None else None
+        tool_calls = (
+            getattr(message, "tool_calls", None) if message is not None else None
+        )
+        has_refusal = isinstance(refusal, str) and bool(refusal.strip())
+        has_tool_calls = isinstance(tool_calls, (list, tuple)) and bool(tool_calls)
+        diagnostic: dict[str, object] = {
+            "request_attempt": self.last_api_request_count,
+            "response_retry_number": response_attempt,
+            "transport_retry_count": self.last_transport_retry_count,
+            "response_id": _safe_text_attribute(response, "id"),
+            "returned_model": _safe_text_attribute(response, "model"),
+            "choice_count": choice_count,
+            "selected_choice_index": 0 if choice is not None else None,
+            "finish_reason": finish_reason_text,
+            "message_present": message is not None,
+            "content_is_none": content is None,
+            "content_length": len(stripped),
+            "refusal": has_refusal,
+            "tool_calls": has_tool_calls,
+            "reasoning_fields_present": any(
+                getattr(item, field_name, None) is not None
+                for item in (choice, message)
+                if item is not None
+                for field_name in ("reasoning", "reasoning_content")
+            ),
+            "prompt_tokens": _usage_value(response, "prompt_tokens"),
+            "completion_tokens": _usage_value(response, "completion_tokens"),
+            "total_tokens": _usage_value(response, "total_tokens"),
+            "max_output_tokens": max_output_tokens,
+            "purpose": purpose,
+        }
+        if stripped:
+            return diagnostic, content_text, EmptyModelResponseError
+        normalized_reason = (finish_reason_text or "").lower()
+        if normalized_reason in {"length", "max_tokens", "max_output_tokens"}:
+            return diagnostic, None, ModelOutputLimitError
+        if has_refusal:
+            return diagnostic, None, ModelRefusalError
+        if has_tool_calls:
+            return diagnostic, None, MalformedModelResponseError
+        return diagnostic, None, EmptyModelResponseError
+
+    def _accumulate_usage(self, response: object) -> None:
+        usage = {
+            key: _usage_value(response, key)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+        if not any(value is not None for value in usage.values()):
+            return
+        existing = self.last_token_usage or {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        self.last_token_usage = {
+            key: existing[key] + (value or 0) for key, value in usage.items()
+        }
+
+    def _transport_failure_diagnostic(
+        self,
+        *,
+        error: Exception,
+        response_attempt: int,
+        transport_attempt: int,
+        purpose: str,
+        max_output_tokens: int,
+    ) -> dict[str, object]:
+        return {
+            "request_attempt": self.last_api_request_count,
+            "response_retry_number": response_attempt,
+            "transport_retry_count": self.last_transport_retry_count,
+            "transport_attempt": transport_attempt,
+            "purpose": purpose,
+            "max_output_tokens": max_output_tokens,
+            "exception_type": type(error).__name__,
+            "exception_message": str(error),
+        }
+
+    def _response_error_message(
+        self, diagnostic: dict[str, object], *, attempts: int | None = None
+    ) -> str:
+        attempt_text = f" after {attempts} attempts" if attempts is not None else ""
+        return (
+            "Nebius returned no usable final content"
+            f"{attempt_text} (finish_reason={diagnostic.get('finish_reason')!r}, "
+            f"choices={diagnostic.get('choice_count')}, "
+            f"content_length={diagnostic.get('content_length')}, "
+            f"tool_calls={diagnostic.get('tool_calls')}, "
+            f"refusal={diagnostic.get('refusal')}, "
+            f"max_output_tokens={diagnostic.get('max_output_tokens')})"
+        )
+
+
+def _safe_text_attribute(value: object, name: str) -> str | None:
+    attribute = getattr(value, name, None)
+    return attribute if isinstance(attribute, str) else None
+
+
+def _usage_value(response: object, name: str) -> int | None:
+    usage = getattr(response, "usage", None)
+    value = getattr(usage, name, None) if usage is not None else None
+    return value if isinstance(value, int) else None
 
 
 class RecordingRoleModel:
@@ -293,6 +543,7 @@ class RecordingRoleModel:
         return self._record(
             role=role,
             messages=messages,
+            schema_name=None,
             generate=lambda: self._model.generate(role=role, messages=messages),
         )
 
@@ -308,6 +559,7 @@ class RecordingRoleModel:
         return self._record(
             role=role,
             messages=messages,
+            schema_name=schema_name,
             generate=lambda: self._model.generate_structured(
                 role=role,
                 messages=messages,
@@ -321,6 +573,7 @@ class RecordingRoleModel:
         *,
         role: Role,
         messages: list[dict[str, str]],
+        schema_name: str | None,
         generate: Callable[[], str],
     ) -> str:
         started = time.perf_counter()
@@ -343,7 +596,11 @@ class RecordingRoleModel:
                     token_usage=_token_usage(self._model),
                     api_request_count=_request_count(self._model),
                     transport_retry_count=_retry_count(self._model),
+                    response_retry_count=_response_retry_count(self._model),
                     finish_reason=_finish_reason(self._model),
+                    purpose=_purpose(role=role, schema_name=schema_name),
+                    structured_schema_name=schema_name,
+                    provider_attempts=_provider_attempts(self._model),
                 )
             )
             if self._call_observer:
@@ -359,7 +616,11 @@ class RecordingRoleModel:
                 token_usage=_token_usage(self._model),
                 api_request_count=_request_count(self._model),
                 transport_retry_count=_retry_count(self._model),
+                response_retry_count=_response_retry_count(self._model),
                 finish_reason=_finish_reason(self._model),
+                purpose=_purpose(role=role, schema_name=schema_name),
+                structured_schema_name=schema_name,
+                provider_attempts=_provider_attempts(self._model),
             )
         )
         if self._call_observer:
@@ -383,9 +644,25 @@ def _retry_count(model: RoleModel) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+def _response_retry_count(model: RoleModel) -> int:
+    value = getattr(model, "last_response_retry_count", 0)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
 def _finish_reason(model: RoleModel) -> str | None:
     value = getattr(model, "last_finish_reason", None)
     return value if isinstance(value, str) else None
+
+
+def _provider_attempts(model: RoleModel) -> list[dict[str, object]]:
+    attempts = getattr(model, "last_provider_attempts", [])
+    return [dict(item) for item in attempts if isinstance(item, dict)]
+
+
+def _purpose(*, role: Role, schema_name: str | None) -> str:
+    if schema_name is not None:
+        return schema_name
+    return "executor_strategy" if role == "executor" else role
 
 
 def build_scripted_model(scenario: str) -> ScriptedRoleModel:

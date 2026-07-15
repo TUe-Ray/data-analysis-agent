@@ -31,7 +31,7 @@ from data_analysis_agent.benchmark_tasks import (
     stage_public_task,
 )
 from data_analysis_agent.benchmark_types import BenchmarkConfig, PublicTaskView
-from data_analysis_agent.models import ScriptedRoleModel
+from data_analysis_agent.models import EmptyModelResponseError, ScriptedRoleModel
 from data_analysis_agent.python_runner import LocalPythonRunner
 
 
@@ -51,10 +51,21 @@ def config() -> BenchmarkConfig:
 
 def test_benchmark_parser_accepts_max_replans() -> None:
     args = build_parser().parse_args(
-        ["--task", "successive_difference_smoke", "--max-replans", "5"]
+        [
+            "--task",
+            "successive_difference_smoke",
+            "--max-replans",
+            "5",
+            "--planner-max-output-tokens",
+            "9000",
+            "--python-max-output-tokens",
+            "36000",
+        ]
     )
 
     assert args.max_replans == 5
+    assert args.planner_max_output_tokens == 9000
+    assert args.python_max_output_tokens == 36000
 
 
 def test_agent_uses_configured_max_replans(task, tmp_path: Path) -> None:
@@ -185,6 +196,51 @@ def test_direct_answer_is_exactly_one_call_without_execution_or_repair(
     assert outcome.api_call_count == 1
     assert outcome.generated_script_count == 0
     assert outcome.local_repair_count == 0
+
+
+def test_empty_provider_response_is_an_infrastructure_error(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    class EmptyResponseModel:
+        last_api_request_count = 3
+        last_transport_retry_count = 0
+        last_response_retry_count = 2
+        last_token_usage = {
+            "prompt_tokens": 30,
+            "completion_tokens": 0,
+            "total_tokens": 30,
+        }
+        last_finish_reason = "stop"
+        last_provider_attempts = [
+            {
+                "response_retry_number": attempt,
+                "content_length": 0,
+                "purpose": "direct_answer",
+            }
+            for attempt in range(3)
+        ]
+
+        def generate(self, *, role, messages):
+            del role, messages
+            raise EmptyModelResponseError("no usable content after 3 attempts")
+
+        def generate_structured(self, *, role, messages, schema_name, schema):
+            del role, messages, schema_name, schema
+            raise AssertionError("not used by direct_answer")
+
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    outcome = run_direct_answer(
+        public=public,
+        model=EmptyResponseModel(),
+        run_directory=tmp_path / "attempt",
+        config=config,
+    )
+
+    assert outcome.status == "infrastructure_error"
+    assert outcome.error_category == "provider_response"
+    assert outcome.api_call_count == 3
+    assert outcome.response_retry_count == 2
+    assert outcome.total_tokens == 30
 
 
 @pytest.mark.parametrize(
@@ -493,7 +549,7 @@ def test_agent_generated_python_receives_usable_relative_public_paths(
     assert "Normalized generated_python capability_name" in workflow_log
 
 
-def test_failed_agent_call_does_not_leave_empty_agent_run(
+def test_failed_agent_call_persists_failure_log(
     task, tmp_path: Path, config: BenchmarkConfig
 ) -> None:
     attempt = tmp_path / "attempt"
@@ -508,7 +564,81 @@ def test_failed_agent_call_does_not_leave_empty_agent_run(
     )
 
     assert outcome.status == "error"
-    assert not (attempt / "agent_run").exists()
+    workflow_log = (attempt / "agent_run/workflow.log").read_text(encoding="utf-8")
+    assert "Exchange: 1" in workflow_log
+    assert "Purpose: planner" in workflow_log
+    assert "No scripted planner response remains" in workflow_log
+
+
+def test_agent_provider_failure_preserves_partial_metrics_and_log(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    class EmptyResponseModel:
+        last_api_request_count = 3
+        last_transport_retry_count = 0
+        last_response_retry_count = 2
+        last_token_usage = {
+            "prompt_tokens": 30,
+            "completion_tokens": 0,
+            "total_tokens": 30,
+        }
+        last_finish_reason = "stop"
+        last_provider_attempts = [{"content_length": 0, "purpose": "executor"}]
+
+        def generate(self, *, role, messages):
+            del role, messages
+            raise EmptyModelResponseError("no usable content after 3 attempts")
+
+        def generate_structured(self, *, role, messages, schema_name, schema):
+            del role, messages, schema_name, schema
+            raise AssertionError("not used")
+
+    class PartiallyCompletedWorkflow:
+        recorder = None
+
+        def stream(self, initial_state, stream_mode):
+            assert stream_mode == "values"
+            yield {
+                **initial_state,
+                "generated_script_count": 7,
+                "code_repair_count": 2,
+                "replan_count": 3,
+                "completed_goal_results": [{"goal_id": "G1", "success": True}],
+                "iteration_history": [{"verification_decision": "PASS"}],
+            }
+            assert self.recorder is not None
+            self.recorder.generate(role="executor", messages=[])
+
+    attempt = tmp_path / "attempt"
+    public = stage_public_task(task.public, attempt)
+    model = EmptyResponseModel()
+    workflow = PartiallyCompletedWorkflow()
+    def build_workflow(recorder, *_args):
+        workflow.recorder = recorder
+        return workflow
+
+    with patch(
+        "data_analysis_agent.benchmark_approaches.build_graph",
+        side_effect=build_workflow,
+    ):
+        outcome = run_agent(
+            public=public,
+            model=model,
+            run_directory=attempt,
+            config=config,
+            progress=lambda event: None,
+        )
+
+    assert outcome.status == "infrastructure_error"
+    assert outcome.error_category == "provider_response"
+    assert outcome.api_call_count == 3
+    assert outcome.response_retry_count == 2
+    assert outcome.generated_script_count == 7
+    assert outcome.local_repair_count == 2
+    assert outcome.global_replan_count == 3
+    workflow_log = (attempt / "agent_run/workflow.log").read_text(encoding="utf-8")
+    assert "Completed GoalResults:" in workflow_log
+    assert "Response retries: 2" in workflow_log
 
 
 def test_orchestrator_isolates_attempts_persists_rows_and_summarizes_offline(

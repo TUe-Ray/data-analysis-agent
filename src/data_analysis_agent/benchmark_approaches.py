@@ -21,7 +21,11 @@ from data_analysis_agent.config import code_repair_settings
 from data_analysis_agent.demo import write_workflow_log
 from data_analysis_agent.final_output import DeterministicFinalOutputProvider
 from data_analysis_agent.graph import build_graph
-from data_analysis_agent.models import RecordingRoleModel, RoleModel
+from data_analysis_agent.models import (
+    ProviderResponseError,
+    RecordingRoleModel,
+    RoleModel,
+)
 from data_analysis_agent.prompts import build_python_repair_messages
 from data_analysis_agent.python_runner import LocalPythonRunner, PythonExecutionResult
 from data_analysis_agent.schemas import (
@@ -221,10 +225,11 @@ def _usage(recorder: RecordingRoleModel) -> tuple[int | None, int | None, int | 
     )
 
 
-def _call_counts(recorder: RecordingRoleModel) -> tuple[int, int]:
+def _call_counts(recorder: RecordingRoleModel) -> tuple[int, int, int]:
     return (
         sum(exchange.api_request_count for exchange in recorder.exchanges),
         sum(exchange.transport_retry_count for exchange in recorder.exchanges),
+        sum(exchange.response_retry_count for exchange in recorder.exchanges),
     )
 
 
@@ -278,6 +283,8 @@ def _model_observer(progress: ProgressCallback | None):
 
 
 def _infrastructure_error(exception: Exception) -> bool:
+    if isinstance(exception, ProviderResponseError):
+        return True
     name = type(exception).__name__
     return name in {
         "APIConnectionError",
@@ -286,6 +293,15 @@ def _infrastructure_error(exception: Exception) -> bool:
         "ConnectTimeout",
         "ReadTimeout",
     } or (name == "InternalServerError")
+
+
+def _provider_response_error(exception_class: str | None) -> bool:
+    return exception_class in {
+        "EmptyModelResponseError",
+        "MalformedModelResponseError",
+        "ModelOutputLimitError",
+        "ModelRefusalError",
+    }
 
 
 def _save_json(path: Path, value: object) -> None:
@@ -361,7 +377,7 @@ def run_direct_answer(
             )
             not_applicable_reason = None
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
-    api_call_count, retry_count = _call_counts(recorder)
+    api_call_count, retry_count, response_retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
@@ -370,8 +386,15 @@ def run_direct_answer(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         transport_retry_count=retry_count,
+        response_retry_count=response_retry_count,
         run_error=error,
-        error_category=("transport_api" if status == "infrastructure_error" else None),
+        error_category=(
+            "provider_response"
+            if _provider_response_error(exception_class)
+            else "transport_api"
+            if status == "infrastructure_error"
+            else None
+        ),
         exception_class=(exception_class if status == "infrastructure_error" else None),
         not_applicable_reason=not_applicable_reason,
     )
@@ -434,7 +457,7 @@ def run_one_shot_code(
         status = "infrastructure_error" if _infrastructure_error(exception) else "error"
         error = f"{type(exception).__name__}: {exception}"
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
-    api_call_count, retry_count = _call_counts(recorder)
+    api_call_count, retry_count, response_retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
@@ -443,12 +466,15 @@ def run_one_shot_code(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         transport_retry_count=retry_count,
+        response_retry_count=response_retry_count,
         execution_exit_code=execution.exit_code if execution else None,
         timed_out=execution.timed_out if execution else False,
         generated_script_count=1 if execution else 0,
         run_error=error,
         error_category=(
-            "transport_api"
+            "provider_response"
+            if _provider_response_error(exception_class)
+            else "transport_api"
             if status == "infrastructure_error"
             else "python_policy"
             if status == "python_policy_failure"
@@ -669,7 +695,7 @@ def run_single_agent_checker(
         status = "infrastructure_error" if _infrastructure_error(exception) else "error"
         error = f"{type(exception).__name__}: {exception}"
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
-    api_call_count, retry_count = _call_counts(recorder)
+    api_call_count, retry_count, response_retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
@@ -678,6 +704,7 @@ def run_single_agent_checker(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         transport_retry_count=retry_count,
+        response_retry_count=response_retry_count,
         execution_exit_code=execution.exit_code if execution else None,
         timed_out=execution.timed_out if execution else False,
         generated_script_count=(
@@ -691,7 +718,9 @@ def run_single_agent_checker(
         global_checker_repair_count=checker_repairs,
         run_error=error,
         error_category=(
-            "transport_api"
+            "provider_response"
+            if _provider_response_error(exception_class)
+            else "transport_api"
             if status == "infrastructure_error"
             else "python_policy"
             if status == "python_policy_failure"
@@ -724,6 +753,8 @@ def run_agent(
     recorder = RecordingRoleModel(model, _model_observer(progress))
     agent_directory = run_directory / "agent_run"
     exception_class = None
+    workflow_started = time.perf_counter()
+    result: AgentState = {}
     try:
         if progress:
             _progress(progress, "workflow_started")
@@ -745,6 +776,7 @@ def run_agent(
             "trace": [],
             "iteration_history": [],
         }
+        result = initial_state
         workflow = build_graph(
             recorder,
             DeterministicFinalOutputProvider(),
@@ -882,12 +914,6 @@ def run_agent(
                     f"{time.perf_counter() - workflow_started:.1f}s"
                 ),
             )
-        agent_directory.mkdir(parents=True, exist_ok=True)
-        write_workflow_log(
-            log_path=agent_directory / "workflow.log",
-            result=result,
-            exchanges=recorder.exchanges,
-        )
         partial_run = config.stop_after_goals is not None
         partial_reached = bool(result.get("partial_run_reached", False))
         completed_goals = list(result.get("completed_goal_results", []))
@@ -959,15 +985,37 @@ def run_agent(
         exception_class = type(exception).__name__
         status = "infrastructure_error" if _infrastructure_error(exception) else "error"
         error = f"{type(exception).__name__}: {exception}"
+        result = {
+            **result,
+            "status": status,
+            "final_answer": error,
+        }
         exit_code = None
         timed_out = False
-        decisions = []
-        scripts = repairs = replans = 0
+        decisions = [
+            str(record["verification_decision"])
+            for record in result.get("iteration_history", [])
+            if "verification_decision" in record
+        ]
+        scripts = int(result.get("generated_script_count", 0))
+        repairs = int(result.get("code_repair_count", 0))
+        replans = int(result.get("replan_count", 0))
         partial_run = config.stop_after_goals is not None
         partial_reached = False
         partial_goal_id = None
+    finally:
+        if result:
+            try:
+                agent_directory.mkdir(parents=True, exist_ok=True)
+                write_workflow_log(
+                    log_path=agent_directory / "workflow.log",
+                    result=result,
+                    exchanges=recorder.exchanges,
+                )
+            except Exception:
+                pass
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
-    api_call_count, retry_count = _call_counts(recorder)
+    api_call_count, retry_count, response_retry_count = _call_counts(recorder)
     return ApproachOutcome(
         status=status,
         candidate=candidate,
@@ -976,6 +1024,7 @@ def run_agent(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         transport_retry_count=retry_count,
+        response_retry_count=response_retry_count,
         execution_exit_code=exit_code,
         timed_out=timed_out,
         generated_script_count=scripts,
@@ -983,7 +1032,9 @@ def run_agent(
         global_replan_count=replans,
         run_error=error,
         error_category=(
-            "transport_api"
+            "provider_response"
+            if _provider_response_error(exception_class)
+            else "transport_api"
             if status == "infrastructure_error"
             else "python_policy"
             if status == "python_policy_failure"

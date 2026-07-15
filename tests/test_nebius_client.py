@@ -1,5 +1,6 @@
 import importlib
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
 
 import httpx
 import pytest
@@ -7,9 +8,45 @@ from openai import APIConnectionError, BadRequestError
 
 from data_analysis_agent import nebius_client
 from data_analysis_agent.config import Settings
-from data_analysis_agent.models import ModelCapabilityError, NebiusRoleModel
+from data_analysis_agent.models import (
+    EmptyModelResponseError,
+    ModelCapabilityError,
+    ModelOutputLimitError,
+    NebiusRoleModel,
+)
 from data_analysis_agent.nebius_client import create_nebius_client
 from data_analysis_agent.schemas import PythonGeneration
+
+
+def _response(
+    content: str | None,
+    *,
+    finish_reason: str | None = "stop",
+    usage: tuple[int, int, int] | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="response-id",
+        model="test-model",
+        usage=(
+            SimpleNamespace(
+                prompt_tokens=usage[0],
+                completion_tokens=usage[1],
+                total_tokens=usage[2],
+            )
+            if usage is not None
+            else None
+        ),
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(
+                    content=content,
+                    refusal=None,
+                    tool_calls=None,
+                ),
+            )
+        ],
+    )
 
 
 def test_importing_client_module_does_not_construct_a_client() -> None:
@@ -104,6 +141,98 @@ def test_nebius_structured_generation_uses_strict_json_schema() -> None:
             "schema": schema,
         },
     }
+
+
+def test_nebius_uses_purpose_specific_output_limits() -> None:
+    client = Mock()
+    client.chat.completions.create.return_value = _response('{"ok":true}')
+    model = NebiusRoleModel(client=client, model="test-model")
+
+    model.generate(role="planner", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
+    model.generate(role="executor", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
+    model.generate(role="verifier", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
+    model.generate(role="direct_answer", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 4096
+    model.generate_structured(
+        role="executor",
+        messages=[],
+        schema_name="python_generation",
+        schema=PythonGeneration.model_json_schema(),
+    )
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 32768
+
+
+def test_legacy_general_limit_does_not_lower_python_limit() -> None:
+    client = Mock()
+    client.chat.completions.create.return_value = _response('{"ok":true}')
+    model = NebiusRoleModel(client=client, model="test-model", max_output_tokens=5000)
+
+    model.generate(role="planner", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 5000
+    model.generate_structured(
+        role="executor",
+        messages=[],
+        schema_name="python_repair",
+        schema=PythonGeneration.model_json_schema(),
+    )
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 32768
+
+
+def test_nebius_retries_empty_responses_and_accumulates_usage() -> None:
+    client = Mock()
+    client.chat.completions.create.side_effect = [
+        _response(None, usage=(10, 1, 11)),
+        _response("   ", usage=(20, 2, 22)),
+        _response('{"ok":true}', usage=(30, 3, 33)),
+    ]
+    model = NebiusRoleModel(client=client, model="test-model")
+
+    with patch("data_analysis_agent.models.time.sleep") as sleep:
+        output = model.generate(role="executor", messages=[])
+
+    assert output == '{"ok":true}'
+    assert client.chat.completions.create.call_count == 3
+    assert model.last_api_request_count == 3
+    assert model.last_response_retry_count == 2
+    assert model.last_token_usage == {
+        "prompt_tokens": 60,
+        "completion_tokens": 6,
+        "total_tokens": 66,
+    }
+    assert len(model.last_provider_attempts) == 3
+    assert model.last_provider_attempts[0]["content_length"] == 0
+    sleep.assert_has_calls([call(0.5), call(1.5)])
+
+
+def test_nebius_raises_typed_error_after_empty_response_retries() -> None:
+    client = Mock()
+    client.chat.completions.create.return_value = _response(None)
+    model = NebiusRoleModel(client=client, model="test-model")
+
+    with patch("data_analysis_agent.models.time.sleep"), pytest.raises(
+        EmptyModelResponseError, match="after 3 attempts"
+    ):
+        model.generate(role="executor", messages=[])
+
+    assert client.chat.completions.create.call_count == 3
+    assert model.last_response_retry_count == 2
+
+
+def test_nebius_does_not_retry_blank_length_terminated_response() -> None:
+    client = Mock()
+    client.chat.completions.create.return_value = _response(
+        None, finish_reason="length"
+    )
+    model = NebiusRoleModel(client=client, model="test-model")
+
+    with pytest.raises(ModelOutputLimitError, match="finish_reason='length'"):
+        model.generate(role="planner", messages=[])
+
+    assert client.chat.completions.create.call_count == 1
+    assert model.last_response_retry_count == 0
 
 
 def test_unsupported_schema_is_cached_per_configured_model() -> None:

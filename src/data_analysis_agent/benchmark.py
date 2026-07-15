@@ -231,6 +231,10 @@ def _live_model_factory(config: BenchmarkConfig) -> ModelFactory:
             temperature=config.temperature,
             top_p=config.top_p,
             max_output_tokens=config.max_output_tokens,
+            planner_max_output_tokens=config.planner_max_output_tokens,
+            executor_max_output_tokens=config.executor_max_output_tokens,
+            verifier_max_output_tokens=config.verifier_max_output_tokens,
+            python_max_output_tokens=config.python_max_output_tokens,
         )
 
     return factory
@@ -262,6 +266,16 @@ def _metrics(results: list[BenchmarkResult]) -> dict[str, ApproachMetrics]:
             timeout_count=sum(result.timed_out for result in attempted),
             average_api_calls=(
                 fmean(result.api_call_count for result in attempted)
+                if attempted
+                else 0.0
+            ),
+            average_transport_retry_count=(
+                fmean(result.transport_retry_count for result in attempted)
+                if attempted
+                else 0.0
+            ),
+            average_response_retry_count=(
+                fmean(result.response_retry_count for result in attempted)
                 if attempted
                 else 0.0
             ),
@@ -444,7 +458,11 @@ def run_benchmark(
                                 "target_reached": outcome.partial_run_reached,
                             }
                             if outcome.partial_run
-                            else {"error_category": "infrastructure_error"}
+                            else {
+                                "error_category": (
+                                    outcome.error_category or "infrastructure_error"
+                                )
+                            }
                         )
                     ),
                     api_call_count=outcome.api_call_count,
@@ -452,6 +470,7 @@ def run_benchmark(
                     completion_tokens=outcome.completion_tokens,
                     total_tokens=outcome.total_tokens,
                     transport_retry_count=outcome.transport_retry_count,
+                    response_retry_count=outcome.response_retry_count,
                     wall_clock_latency=latency,
                     execution_exit_code=outcome.execution_exit_code,
                     timed_out=outcome.timed_out,
@@ -522,8 +541,11 @@ def format_benchmark_summary(
             else []
         ),
         "",
-        "Approach       Passed   API calls   Tokens   Latency   Status",
-        "-" * 64,
+        (
+            "Approach       Passed   API calls   Transport retries   "
+            "Response retries   Tokens   Latency   Status"
+        ),
+        "-" * 98,
     ]
     for approach in summary.config.approaches:
         metric = summary.metrics[approach]
@@ -537,7 +559,9 @@ def format_benchmark_summary(
         )
         lines.append(
             f"{approach:<15} {metric.passed_runs}/{metric.attempted_runs:<5} "
-            f"{metric.average_api_calls:>7.1f}   {tokens:>6}   "
+            f"{metric.average_api_calls:>7.1f}   "
+            f"{metric.average_transport_retry_count:>17.1f}   "
+            f"{metric.average_response_retry_count:>12.1f}   {tokens:>6}   "
             f"{metric.average_latency:>6.2f}s   {status.replace('_', ' ')}"
         )
     lines.extend(["", "-" * 60, "ERROR SUMMARY", "-" * 60])
@@ -608,7 +632,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float)
-    parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        help=(
+            "Legacy general output limit for ordinary calls; does not lower "
+            "structured Python generation or repair."
+        ),
+    )
+    parser.add_argument(
+        "--planner-max-output-tokens",
+        type=int,
+        help="Planner output limit (default: 8192).",
+    )
+    parser.add_argument(
+        "--executor-max-output-tokens",
+        type=int,
+        help="Executor strategy-selection output limit (default: 8192).",
+    )
+    parser.add_argument(
+        "--verifier-max-output-tokens",
+        type=int,
+        help="Verifier output limit (default: 8192).",
+    )
+    parser.add_argument(
+        "--python-max-output-tokens",
+        type=int,
+        help="Structured Python generation and repair output limit (default: 32768).",
+    )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument(
         "--max-replans",
@@ -642,6 +693,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             temperature=args.temperature,
             top_p=args.top_p,
             max_output_tokens=args.max_output_tokens,
+            planner_max_output_tokens=args.planner_max_output_tokens,
+            executor_max_output_tokens=args.executor_max_output_tokens,
+            verifier_max_output_tokens=args.verifier_max_output_tokens,
+            python_max_output_tokens=args.python_max_output_tokens,
             timeout_seconds=args.timeout,
             max_replans=args.max_replans,
             repeats=args.repeats,

@@ -322,6 +322,27 @@ the current-step panel; redirected output remains append-only and terminal-safe.
 Use `--no-live-progress` to suppress the live presentation layer while retaining
 the saved benchmark artifacts.
 
+### Live-model output limits and response retries
+
+For a live benchmark, ordinary Planner, Executor strategy-selection, and Verifier
+calls default to 8192 output tokens. Strict structured Python generation and
+repair default to 32768 tokens because their source payloads are larger. Direct
+answer, one-shot-code, final-checker, and other non-agent calls retain the legacy
+4096-token default unless `--max-output-tokens` is explicitly supplied.
+
+`--planner-max-output-tokens`, `--executor-max-output-tokens`, and
+`--verifier-max-output-tokens` override their corresponding ordinary agent call.
+`--python-max-output-tokens` overrides only structured Python generation and
+repair. The legacy `--max-output-tokens` overrides ordinary calls and legacy
+non-agent calls, but never lowers the Python-specific 32768-token default.
+
+The Nebius adapter retries connection/time-out/retryable-5xx transport failures
+once. It separately retries a successful-but-empty provider response at most
+twice, retaining every request and its returned usage in benchmark metrics. An
+exhausted empty or malformed response is reported as an infrastructure error with
+the `provider_response` category; it does not consume scientific replans or
+Python repair attempts.
+
 Benchmark run directories identify both the task and comparison scope. For
 example:
 
