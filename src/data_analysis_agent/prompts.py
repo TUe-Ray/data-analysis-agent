@@ -19,7 +19,10 @@ JSON-compatible facts (for example counts, finite statistics, or concise status
 facts) or explicitly declared analysis artifacts. Never require an in-memory
 DataFrame, Series, array, or other Python object to appear in a goal result; a
 tabular intermediate belongs in a declared artifact after its producing goal is
-verified."""
+verified. A scientific replan must return the full workflow, including every
+completed goal unchanged. Never reuse a completed goal_id for a new definition.
+When a revised goal needs a prior approved artifact, explicitly list its producer
+goal_id in depends_on; artifacts are not otherwise available."""
 
 PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid scientific
 HighLevelPlan response. Return exactly one JSON object matching the required
@@ -131,6 +134,8 @@ def build_planner_messages(
     verification_feedback: str | None = None,
     previous_plan: dict[str, JsonValue] | None = None,
     completed_goal_results: list[dict[str, JsonValue]] | None = None,
+    completed_goal_fingerprints: dict[str, str] | None = None,
+    approved_artifacts: list[dict[str, JsonValue]] | None = None,
     current_goal_failure: dict[str, JsonValue] | None = None,
 ) -> list[dict[str, str]]:
     """Build global planning context without Executor histories or hidden thought."""
@@ -146,10 +151,27 @@ def build_planner_messages(
             "Completed goal summaries:\n"
             + json.dumps(completed_goal_results, ensure_ascii=False)
         )
+    if completed_goal_fingerprints:
+        parts.append(
+            "Completed goal definition fingerprints (these goals must be retained "
+            "unchanged in the full revised plan):\n"
+            + json.dumps(completed_goal_fingerprints, ensure_ascii=False)
+        )
+    if approved_artifacts:
+        parts.append(
+            "Verifier-approved artifacts (a consumer must explicitly include the "
+            "producer_goal_id in depends_on):\n"
+            + json.dumps(approved_artifacts, ensure_ascii=False)
+        )
     if current_goal_failure is not None:
         parts.append(f"Current goal failure:\n{json.dumps(current_goal_failure)}")
     if verification_feedback is not None:
         parts.append(f"Verifier feedback:\n{verification_feedback}")
+    if previous_plan is not None:
+        parts.append(
+            "Scientific replan requirement: return the complete revised workflow, "
+            "not only residual goals."
+        )
     parts.append(
         "HighLevelPlan JSON schema summary:\n"
         '{"scientific_objective":"string","goals":[{"goal_id":"string",'
@@ -168,6 +190,9 @@ def build_planner_repair_messages(
     question: str,
     invalid_response: str,
     validation_error: str,
+    previous_plan: dict[str, JsonValue] | None = None,
+    completed_goal_fingerprints: dict[str, str] | None = None,
+    approved_artifacts: list[dict[str, JsonValue]] | None = None,
 ) -> list[dict[str, str]]:
     """Build a compact structural-only repair request for Planner output."""
     schema_summary = (
@@ -184,8 +209,27 @@ def build_planner_repair_messages(
                 f"Original user question:\n{question}\n\n"
                 f"Invalid Planner response:\n{invalid_response}\n\n"
                 f"Deterministic validation error:\n{validation_error}\n\n"
-                f"HighLevelPlan JSON schema summary:\n{schema_summary}\n\n"
-                "Dependency rule: every depends_on item must exactly match an "
+                + (
+                    "Previous full plan (return it with valid revisions, retaining "
+                    "completed goals exactly):\n"
+                    f"{json.dumps(previous_plan)}\n\n"
+                    if previous_plan is not None
+                    else ""
+                )
+                + (
+                    "Completed immutable goal fingerprints:\n"
+                    f"{json.dumps(completed_goal_fingerprints)}\n\n"
+                    if completed_goal_fingerprints
+                    else ""
+                )
+                + (
+                    "Approved artifacts; consumers must depend on their producer:\n"
+                    f"{json.dumps(approved_artifacts)}\n\n"
+                    if approved_artifacts
+                    else ""
+                )
+                + f"HighLevelPlan JSON schema summary:\n{schema_summary}\n\n"
+                + "Dependency rule: every depends_on item must exactly match an "
                 "existing earlier goal_id; forward and missing dependencies are "
                 "invalid."
             ),
@@ -221,8 +265,7 @@ def build_executor_messages(
             "Completed prerequisite GoalResults:\n"
             + json.dumps(completed_goal_results or []),
             "Verifier-approved prerequisite artifacts (producer, exact path, "
-            "description, media type):\n"
-            + json.dumps(approved_artifacts or []),
+            "description, media type):\n" + json.dumps(approved_artifacts or []),
             "Available capability catalog:\n" + json.dumps(capability_catalog or []),
         ]
         if verification_feedback:
@@ -273,6 +316,7 @@ def build_python_repair_messages(
     stdout: str,
     stderr: str,
     error: str | None,
+    failure_fingerprint: str | None = None,
     staged_file_paths: list[str],
     goal_directory: str,
     repair_history: list[dict[str, object]] | None = None,
@@ -287,6 +331,8 @@ def build_python_repair_messages(
                 f"Current IntermediateGoal:\n{json.dumps(current_goal)}\n\n"
                 f"Generated code:\n{code}\n\n"
                 f"Typed failure category:\n{failure_category}\n\n"
+                "Normalized concrete failure fingerprint:\n"
+                f"{failure_fingerprint or failure_category}\n\n"
                 f"stdout:\n{stdout}\n\n"
                 f"stderr:\n{stderr}\n\n"
                 f"Execution error:\n{error or 'none'}\n\n"
@@ -303,9 +349,7 @@ def build_python_repair_messages(
                 "Assign the JSON-compatible result object to __agent_result__; the "
                 "trusted runner owns serialization and stdout is not authoritative.\n\n"
                 "Deterministic diagnosis to repair:\n"
-                f"{error or failure_category}\n\n"
-                + PYTHON_RESULT_SKELETON
-                + "\n"
+                f"{error or failure_category}\n\n" + PYTHON_RESULT_SKELETON + "\n"
                 "If this is a PythonPolicyError, repair using only the exact "
                 "absolute paths above as direct literals. Do not use __file__, "
                 "os.path, environment values, globbing, loops, or function "

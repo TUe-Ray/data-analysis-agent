@@ -72,8 +72,10 @@ FINAL_CHECKER_SYSTEM_PROMPT = """You are an independent final completeness
 checker. Assess the public task, public answer schema, candidate answer, factual
 execution result, artifact summary, and limitations. Return exactly one
 FinalCheckerOutput JSON object. Return PASS only if the candidate is complete and
-supported. Return REPAIR with concise actionable missing-field or completeness
-feedback otherwise. You do not write code and are called exactly once."""
+supported, with repair_scope="none". Return REPAIR with concise actionable
+feedback and repair_scope="format_only" for representation-only issues or
+"rerun_analysis" for any scientific/data-analysis correction. You do not write
+code and are called exactly once."""
 
 
 def build_direct_answer_messages(public: PublicTaskView) -> list[dict[str, str]]:
@@ -117,7 +119,7 @@ def build_one_shot_code_messages(public: PublicTaskView) -> list[dict[str, str]]
 
 
 def build_single_agent_messages(
-    public: PublicTaskView, run_directory: Path
+    public: PublicTaskView, run_directory: Path, staged_files: list[Path]
 ) -> list[dict[str, str]]:
     """Give the ablation's sole analysis agent the same public task boundary."""
     return [
@@ -127,8 +129,13 @@ def build_single_agent_messages(
             "content": (
                 f"Task ID: {public.task_id}\n\nTask prompt:\n{public.prompt}\n\n"
                 f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
-                f"Allowed staged input paths:\n{json.dumps(public.data_files)}\n\n"
-                f"Assigned execution directory:\n{run_directory}\n\n"
+                "Process current working directory (cwd):\n"
+                f"{run_directory.resolve()}\n\n"
+                "Allowed staged input paths (absolute paths; use these exact paths "
+                "directly as Python string literals):\n"
+                f"{json.dumps([str(path) for path in staged_files])}\n\n"
+                "Relative input paths are invalid. Relative output paths resolve "
+                "inside the assigned execution directory.\n\n"
                 "Return the complete answer-schema object in __agent_result__."
             ),
         },
@@ -182,6 +189,52 @@ def build_final_answer_repair_messages(
             ),
         },
     ]
+
+
+def build_single_agent_checker_repair_messages(
+    *,
+    public: PublicTaskView,
+    source: str,
+    execution: PythonExecutionResult,
+    feedback: str,
+    repair_scope: str,
+    staged_files: list[Path],
+    execution_directory: Path,
+) -> list[dict[str, str]]:
+    """Request a checker-directed repair that is grounded in a second execution."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Regenerate executable analysis Python, not an answer-only JSON "
+                "rewrite. "
+                "Return exactly one PythonRepair JSON object. The repaired program is "
+                "executed and its __agent_result__ is the only candidate that can "
+                "be used."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Original task:\n{public.prompt}\n\n"
+                f"Exact public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                "Process cwd / assigned execution directory:\n"
+                f"{execution_directory.resolve()}\n\n"
+                "Allowed absolute staged input paths (use directly as string literals; "
+                "relative input paths are invalid):\n"
+                f"{json.dumps([str(path) for path in staged_files])}\n\n"
+                f"Previous generated Python:\n{source}\n\n"
+                "Previous factual execution result:\n"
+                f"{json.dumps(execution.model_dump(mode='json'))}\n\n"
+                f"Checker repair scope: {repair_scope}\n"
+                f"Checker feedback: {feedback}\n\n"
+                "Use kind='python_repair' and addressed_failure_category="
+                "'result_contract_error'."
+            ),
+        },
+    ]
+
+
 def _content_key(public: PublicTaskView, staged_name: str) -> str:
     if staged_name in public.data_contents:
         return staged_name
@@ -485,7 +538,8 @@ def run_one_shot_code(
 
 
 def _validate_against_public_schema(
-    value: object, schema: object, path: str = "$") -> None:
+    value: object, schema: object, path: str = "$"
+) -> None:
     """Validate the repository's JSON-Schema subset without private grader access."""
     if not isinstance(schema, dict):
         return
@@ -521,9 +575,7 @@ def _validate_against_public_schema(
             _validate_against_public_schema(item, item_schema, f"{path}[{index}]")
     elif kind == "string" and not isinstance(value, str):
         raise ValueError(f"{path} must be a string")
-    elif kind == "integer" and (
-        not isinstance(value, int) or isinstance(value, bool)
-    ):
+    elif kind == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
         raise ValueError(f"{path} must be an integer")
     elif kind == "number" and (
         not isinstance(value, (int, float)) or isinstance(value, bool)
@@ -553,6 +605,10 @@ def run_single_agent_checker(
     """Run one iterative code agent and exactly one independent final checker."""
     recorder = RecordingRoleModel(model, _model_observer(progress))
     execution_directory = run_directory / "single_agent_run"
+    # Resolve once at the public staging boundary.  Prompts, repair prompts, and
+    # the runner must share this exact allowlist rather than independently
+    # interpreting relative ``inputs/...`` display paths from the Python cwd.
+    staged_files = _resolved_public_files(public, run_directory)
     goal = IntermediateGoal(
         goal_id="single_analysis",
         objective="Produce the complete public answer-schema object.",
@@ -563,9 +619,9 @@ def run_single_agent_checker(
     runner = LocalPythonRunner(
         timeout_seconds=config.timeout_seconds,
         progress_callback=(
-            lambda message: _progress(progress, "activity", message=message)
-            if progress
-            else None
+            lambda message: (
+                _progress(progress, "activity", message=message) if progress else None
+            )
         ),
     )
     max_repairs, no_progress_limit = code_repair_settings()
@@ -583,7 +639,9 @@ def run_single_agent_checker(
             if version == 1:
                 raw = recorder.generate_structured(
                     role="single_agent",
-                    messages=build_single_agent_messages(public, execution_directory),
+                    messages=build_single_agent_messages(
+                        public, execution_directory, staged_files
+                    ),
                     schema_name="single_agent_python_generation",
                     schema=PythonGeneration.model_json_schema(),
                 )
@@ -608,10 +666,7 @@ def run_single_agent_checker(
                         stdout=previous.stdout if previous else "",
                         stderr=previous.stderr if previous else "",
                         error=previous.error if previous else error,
-                        staged_file_paths=[
-                            str(path)
-                            for path in _resolved_public_files(public, run_directory)
-                        ],
+                        staged_file_paths=[str(path) for path in staged_files],
                         goal_directory=str(execution_directory),
                         repair_history=[],
                     ),
@@ -634,7 +689,7 @@ def run_single_agent_checker(
                 execution = runner.run(
                     code=source,
                     goal_directory=execution_directory,
-                    allowed_files=_resolved_public_files(public, run_directory),
+                    allowed_files=staged_files,
                     version=version,
                 )
                 if execution.success:
@@ -670,21 +725,41 @@ def run_single_agent_checker(
             checker_repairs = 0
             if checker.decision == "REPAIR":
                 checker_repairs = 1
-                repaired_raw = recorder.generate(
+                repaired_raw = recorder.generate_structured(
                     role="single_agent",
-                    messages=build_final_answer_repair_messages(
+                    messages=build_single_agent_checker_repair_messages(
                         public=public,
-                        candidate=candidate,
+                        source=source,
+                        execution=execution,
                         feedback=checker.feedback,
+                        repair_scope=checker.repair_scope,
+                        staged_files=staged_files,
+                        execution_directory=execution_directory,
                     ),
+                    schema_name="single_agent_checker_python_repair",
+                    schema=PythonRepair.model_json_schema(),
                 )
-                repair_path = execution_directory / "final_answer_repair_response.json"
+                repair_path = execution_directory / "final_checker_python_repair.json"
                 repair_path.write_text(repaired_raw, encoding="utf-8")
-                candidate = _parse_object(repaired_raw)
-                _validate_against_public_schema(candidate, public.answer_schema)
-            _save_json(run_directory / "candidate.json", candidate)
-            status = "completed"
-            error = None
+                repaired = PythonRepair.model_validate_json(repaired_raw)
+                source = repaired.source()
+                execution = runner.run(
+                    code=source,
+                    goal_directory=execution_directory,
+                    allowed_files=staged_files,
+                    version=local_repairs + 2,
+                )
+                if not execution.success:
+                    candidate = None
+                    status = _single_agent_status(execution)
+                    error = execution.error
+                else:
+                    candidate = execution.result
+                    _validate_against_public_schema(candidate, public.answer_schema)
+            if execution.success:
+                _save_json(run_directory / "candidate.json", candidate)
+                status = "completed"
+                error = None
     except (ValueError, ValidationError) as exception:
         candidate = None
         status = "invalid_json"
@@ -708,10 +783,7 @@ def run_single_agent_checker(
         execution_exit_code=execution.exit_code if execution else None,
         timed_out=execution.timed_out if execution else False,
         generated_script_count=(
-            sum(
-                (execution_directory / f"generated_code_v{version}.py").is_file()
-                for version in range(1, local_repairs + 2)
-            )
+            len(list(execution_directory.glob("generated_code_v*.py")))
         ),
         local_repair_count=local_repairs,
         global_replan_count=0,
@@ -839,6 +911,20 @@ def run_agent(
                             completed_goal_ids=completed_goal_ids,
                             current_goal_id=current_goal_id,
                             scientific_replan_count=result.get("replan_count", 0),
+                            plan_revision=result.get("plan_revision", 0),
+                            is_scientific_replan=result.get(
+                                "is_scientific_replan", False
+                            ),
+                            total_goal_count=result.get("total_goal_count", len(goals)),
+                            preserved_completed_count=result.get(
+                                "preserved_completed_count", len(completed_goal_ids)
+                            ),
+                            remaining_goal_count=result.get(
+                                "remaining_goal_count",
+                                len(goals) - len(completed_goal_ids),
+                            ),
+                            invalidated_goal_ids=result.get("invalidated_goal_ids", []),
+                            new_goal_ids=result.get("new_goal_ids", []),
                         )
                     elif event == "planner_validation:INVALID":
                         _progress(
@@ -898,8 +984,7 @@ def run_agent(
                         max_replans = result.get("max_replans", 1)
                         if replan_count < max_replans:
                             message = (
-                                f"Scientific replan: "
-                                f"[{replan_count + 1}/{max_replans}]"
+                                f"Scientific replan: [{replan_count + 1}/{max_replans}]"
                             )
                         else:
                             message = "Scientific replan budget exhausted"

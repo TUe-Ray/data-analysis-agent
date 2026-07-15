@@ -36,6 +36,7 @@ class CodeExecutionRecord(TypedDict, total=False):
     attempt: int
     failure_category: str | None
     normalized_failure_family: str | None
+    normalized_failure_fingerprint: str | None
     consecutive_failure_family_count: int
     exit_code: int | None
     timed_out: bool
@@ -73,6 +74,13 @@ class AgentState(TypedDict, total=False):
     input_context: str
     plan: str
     high_level_plan: dict[str, JsonValue]
+    plan_revision: int
+    is_scientific_replan: bool
+    total_goal_count: int
+    preserved_completed_count: int
+    remaining_goal_count: int
+    invalidated_goal_ids: list[str]
+    new_goal_ids: list[str]
     structured_plan: bool
     current_goal_index: int
     current_goal: dict[str, JsonValue]
@@ -99,6 +107,7 @@ class AgentState(TypedDict, total=False):
     max_code_repair_no_progress_attempts: int
     code_repair_no_progress: bool
     consecutive_failure_family: str | None
+    consecutive_failure_fingerprint: str | None
     current_generated_code: str
     generated_execution_history: list[dict[str, JsonValue]]
     python_response_history: list[dict[str, JsonValue]]

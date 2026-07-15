@@ -10,6 +10,7 @@ from pydantic import (
     StrictStr,
     TypeAdapter,
     field_validator,
+    model_validator,
 )
 
 ExecutionFailureCategory: TypeAlias = Literal[
@@ -176,7 +177,16 @@ class FinalCheckerOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: Literal["PASS", "REPAIR"]
+    repair_scope: Literal["none", "format_only", "rerun_analysis"]
     feedback: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def repair_scope_matches_decision(self) -> "FinalCheckerOutput":
+        if self.decision == "PASS" and self.repair_scope != "none":
+            raise ValueError("PASS requires repair_scope='none'")
+        if self.decision == "REPAIR" and self.repair_scope == "none":
+            raise ValueError("REPAIR requires format_only or rerun_analysis scope")
+        return self
 
 
 class FinalAnswer(BaseModel):

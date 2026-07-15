@@ -190,7 +190,7 @@ def _adapt_legacy_scripted_python_contract(response: str) -> str:
 class NebiusRoleModel:
     """Use one configured Nebius model for each V0 role."""
 
-    _json_schema_capabilities: ClassVar[dict[str, bool]] = {}
+    _json_schema_capabilities: ClassVar[dict[tuple[str, str], bool]] = {}
 
     def __init__(
         self,
@@ -238,7 +238,8 @@ class NebiusRoleModel:
         schema: dict[str, object],
     ) -> str:
         """Require strict provider-native JSON Schema for executable responses."""
-        if self._json_schema_capabilities.get(self._model) is False:
+        capability_key = self._capability_key()
+        if self._json_schema_capabilities.get(capability_key) is False:
             raise ModelCapabilityError(
                 "model_capability_error: model "
                 f"{self._model!r} does not support strict json_schema output"
@@ -259,15 +260,63 @@ class NebiusRoleModel:
                 purpose=self._purpose(role=role, schema_name=schema_name),
             )
         except APIStatusError as error:
-            if error.status_code in {400, 422}:
-                self._json_schema_capabilities[self._model] = False
+            if self._is_explicit_json_schema_unsupported(error):
+                self._json_schema_capabilities[capability_key] = False
                 raise ModelCapabilityError(
                     "model_capability_error: model "
                     f"{self._model!r} rejected strict json_schema output"
                 ) from error
             raise
-        self._json_schema_capabilities[self._model] = True
+        self._json_schema_capabilities[capability_key] = True
         return content
+
+    def _capability_key(self) -> tuple[str, str]:
+        """Scope structured-output facts to the provider endpoint and model."""
+        raw_url = getattr(self._client, "base_url", None)
+        if isinstance(raw_url, str):
+            base_url = raw_url
+        elif raw_url is None or type(raw_url).__module__.startswith("unittest.mock"):
+            base_url = ""
+        else:
+            base_url = str(raw_url)
+        return (base_url.rstrip("/").lower(), self._model)
+
+    @staticmethod
+    def _is_explicit_json_schema_unsupported(error: APIStatusError) -> bool:
+        """Only capability-specific provider rejections may poison the cache."""
+        if error.status_code not in {400, 422}:
+            return False
+        details = [str(error), str(getattr(error, "body", ""))]
+        response = getattr(error, "response", None)
+        if response is not None:
+            try:
+                details.append(response.text)
+            except Exception:  # pragma: no cover - defensive SDK compatibility
+                pass
+        text = " ".join(details).lower()
+        capability_marker = any(
+            marker in text
+            for marker in (
+                "response_format",
+                "json_schema",
+                "json schema",
+                "strict structured",
+                "structured output",
+                "structured outputs",
+            )
+        )
+        unsupported_marker = any(
+            marker in text
+            for marker in (
+                "unsupported",
+                "not supported",
+                "does not support",
+                "not available",
+                "unrecognized parameter",
+                "unknown parameter",
+            )
+        )
+        return capability_marker and unsupported_marker
 
     @classmethod
     def clear_capability_cache(cls) -> None:
@@ -807,6 +856,7 @@ __agent_result__ = {{"mean_absolute_successive_difference": values[0]}}
                 "addressed_failure_category": "runtime_error",
             }
         )
+
     pass_profile = (
         '{"decision":"PASS","feedback":"The table structure, numeric value '
         'column, and missingness are supported by the profile output."}'
@@ -860,6 +910,8 @@ __agent_result__ = {{"mean_absolute_successive_difference": values[0]}}
                     python_strategy,
                     generation(wrong_column_code),
                     repair(other_wrong_code),
+                    repair(wrong_column_code),
+                    repair(wrong_column_code),
                     repair(wrong_column_code),
                 ],
                 "verifier": [fail_python, fail_python],

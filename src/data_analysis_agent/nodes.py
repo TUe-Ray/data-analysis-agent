@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import mimetypes
+import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -86,6 +87,31 @@ def _trace(state: AgentState, event: str) -> list[str]:
     return [*state.get("trace", []), event]
 
 
+def _failure_fingerprint(final: PythonExecutionResult) -> str | None:
+    """Normalize a concrete failure while dropping run-specific traceback noise."""
+    category = final.failure_category
+    if category is None:
+        return None
+    detail = (
+        final.stderr
+        if category in {"runtime_error", "syntax_error"} and final.stderr
+        else final.error or final.stderr or "unknown failure"
+    )
+    lines = [line.strip() for line in detail.splitlines() if line.strip()]
+    exception_lines = [
+        line
+        for line in lines
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):", line)
+    ]
+    meaningful = exception_lines[-1] if exception_lines else lines[-1]
+    meaningful = re.sub(r"/[^\s'\"]+", "<path>", meaningful)
+    meaningful = re.sub(r"\bline \d+\b", "line <n>", meaningful)
+    meaningful = re.sub(r"\bv\d+\.py\b", "v<n>.py", meaningful)
+    meaningful = re.sub(r"0x[0-9a-fA-F]+", "<address>", meaningful)
+    meaningful = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "<uuid>", meaningful)
+    return f"{category}|{meaningful}"
+
+
 def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
     try:
         plan = HighLevelPlan.model_validate_json(raw_output)
@@ -127,18 +153,60 @@ def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
     return plan, True
 
 
+def _goal_fingerprint(goal: IntermediateGoal | dict[str, object]) -> str:
+    """Return a stable identity for a goal definition, not merely its title."""
+    payload = (
+        goal.model_dump(mode="json")
+        if isinstance(goal, IntermediateGoal)
+        else IntermediateGoal.model_validate(goal).model_dump(mode="json")
+    )
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _completed_goal_fingerprints(state: AgentState) -> dict[str, str]:
+    previous = HighLevelPlan.model_validate(state["high_level_plan"])
+    completed_ids = {
+        str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
+    }
+    return {
+        goal.goal_id: _goal_fingerprint(goal)
+        for goal in previous.goals
+        if goal.goal_id in completed_ids
+    }
+
+
+def _validate_replan_continuity(state: AgentState, revised_plan: HighLevelPlan) -> None:
+    """Reject silent loss or mutation of already verified scientific work."""
+    previous = HighLevelPlan.model_validate(state["high_level_plan"])
+    previous_by_id = {goal.goal_id: goal for goal in previous.goals}
+    revised_by_id = {goal.goal_id: goal for goal in revised_plan.goals}
+    for goal_id, fingerprint in _completed_goal_fingerprints(state).items():
+        revised_goal = revised_by_id.get(goal_id)
+        if revised_goal is None:
+            raise PlannerOutputError(
+                f"scientific replan omitted completed goal {goal_id}"
+            )
+        if _goal_fingerprint(revised_goal) != fingerprint:
+            previous_goal = previous_by_id[goal_id]
+            if previous_goal.goal_id == revised_goal.goal_id:
+                raise PlannerOutputError(
+                    "completed goal ID "
+                    f"{goal_id} was reused with a different goal definition"
+                )
+            raise PlannerOutputError(f"completed goal {goal_id} was mutated")
+
+
 def _preserve_completed_results(
     *,
     state: AgentState,
     revised_plan: HighLevelPlan,
 ) -> list[dict[str, object]]:
-    previous = state.get("high_level_plan", {})
-    previous_goals = {
-        str(goal.get("goal_id")): str(goal.get("objective"))
-        for goal in previous.get("goals", [])
-        if isinstance(goal, dict)
+    previous = HighLevelPlan.model_validate(state["high_level_plan"])
+    previous_goals = {goal.goal_id: _goal_fingerprint(goal) for goal in previous.goals}
+    revised_goals = {
+        goal.goal_id: _goal_fingerprint(goal) for goal in revised_plan.goals
     }
-    revised_goals = {goal.goal_id: goal.objective for goal in revised_plan.goals}
     return [
         dict(result)
         for result in state.get("completed_goal_results", [])
@@ -214,6 +282,17 @@ def make_planner_node(model: RoleModel) -> Node:
             completed_goal_results=(
                 state.get("completed_goal_results", []) if is_replan else None
             ),
+            completed_goal_fingerprints=(
+                _completed_goal_fingerprints(state) if is_replan else None
+            ),
+            approved_artifacts=(
+                [
+                    artifact.model_dump(mode="json")
+                    for artifact in _active_approved_artifacts(state)
+                ]
+                if is_replan
+                else None
+            ),
             current_goal_failure=(
                 state.get("current_goal_result") if is_replan else None
             ),
@@ -263,6 +342,8 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
     mode = state.get("planner_mode", "initial")
     try:
         plan, structured = _validate_plan(raw_response)
+        if state.get("planner_mode") == "scientific_replan" and structured:
+            _validate_replan_continuity(state, plan)
     except PlannerOutputError as error:
         validation_error = f"{type(error).__name__}: {error}"
         route = (
@@ -343,6 +424,24 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
         "completed_goal_results": completed,
         "approved_goal_artifacts": approved_artifacts,
         "current_goal_index": next_index,
+        "plan_revision": state.get("plan_revision", 0) + int(is_replan),
+        "is_scientific_replan": is_replan,
+        "total_goal_count": len(plan.goals),
+        "preserved_completed_count": len(completed_ids),
+        "remaining_goal_count": len(plan.goals) - len(completed_ids),
+        "invalidated_goal_ids": [],
+        "new_goal_ids": [
+            goal.goal_id
+            for goal in plan.goals
+            if goal.goal_id
+            not in {
+                item.get("goal_id")
+                for item in state.get("high_level_plan", {}).get("goals", [])
+                if isinstance(item, dict)
+            }
+        ]
+        if is_replan
+        else [],
         "planner_validation_error": None,
         "planner_validation_history": [
             *state.get("planner_validation_history", []),
@@ -363,6 +462,24 @@ def make_planner_repair_node(model: RoleModel) -> Node:
                 question=state["question"],
                 invalid_response=state["planner_raw_response"],
                 validation_error=state.get("planner_validation_error", "Unknown error"),
+                previous_plan=(
+                    state.get("high_level_plan")
+                    if state.get("planner_mode") == "scientific_replan"
+                    else None
+                ),
+                completed_goal_fingerprints=(
+                    _completed_goal_fingerprints(state)
+                    if state.get("planner_mode") == "scientific_replan"
+                    else None
+                ),
+                approved_artifacts=(
+                    [
+                        artifact.model_dump(mode="json")
+                        for artifact in _active_approved_artifacts(state)
+                    ]
+                    if state.get("planner_mode") == "scientific_replan"
+                    else None
+                ),
             ),
         )
         return {
@@ -401,6 +518,7 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         "code_repair_no_progress_count": 0,
         "code_repair_no_progress": False,
         "consecutive_failure_family": None,
+        "consecutive_failure_fingerprint": None,
         "generated_execution_history": [],
         "python_response_history": [],
         "current_generated_code": "",
@@ -583,9 +701,7 @@ def _canonical_source(code: str) -> str:
         ast.fix_missing_locations(tree)
         return ast.dump(tree, include_attributes=False)
     except SyntaxError:
-        return "".join(
-            line.split("#", 1)[0].strip() for line in code.splitlines()
-        )
+        return "".join(line.split("#", 1)[0].strip() for line in code.splitlines())
 
 
 def _materially_changed(previous: str, current: str) -> bool:
@@ -833,19 +949,20 @@ def _finalize_generated_attempt(
         "max_code_repair_no_progress_attempts", max_no_progress
     )
     failure_family = final.failure_category
+    failure_fingerprint = _failure_fingerprint(final)
     if final.success:
         consecutive_family_count = 0
         failure_family = None
-    elif failure_family == state.get("consecutive_failure_family"):
+        failure_fingerprint = None
+    elif failure_fingerprint == state.get("consecutive_failure_fingerprint"):
         consecutive_family_count = state.get("code_repair_no_progress_count", 0) + 1
     else:
         consecutive_family_count = 1
-    no_progress = (
-        not final.success and consecutive_family_count >= no_progress_limit
-    )
+    no_progress = not final.success and consecutive_family_count >= no_progress_limit
     factual.update(
         {
             "normalized_failure_family": failure_family,
+            "normalized_failure_fingerprint": failure_fingerprint,
             "consecutive_failure_family_count": consecutive_family_count,
             "materially_changed": materially_changed,
             "deterministic_result_recovery_attempted": (
@@ -867,6 +984,7 @@ def _finalize_generated_attempt(
         "attempt": repair_attempts,
         "failure_category": final.failure_category,
         "normalized_failure_family": failure_family,
+        "normalized_failure_fingerprint": failure_fingerprint,
         "consecutive_failure_family_count": consecutive_family_count,
         "exit_code": final.exit_code,
         "timed_out": final.timed_out,
@@ -907,6 +1025,7 @@ def _finalize_generated_attempt(
         "max_code_repair_attempts": repair_limit,
         "code_repair_no_progress_count": consecutive_family_count,
         "consecutive_failure_family": failure_family,
+        "consecutive_failure_fingerprint": failure_fingerprint,
         "max_code_repair_no_progress_attempts": no_progress_limit,
         "code_repair_no_progress": no_progress,
         "trace": _trace(state, trace_event),
@@ -1110,6 +1229,7 @@ def make_mechanical_repair_node(
             stdout=previous.stdout,
             stderr=previous.stderr,
             error=previous.error,
+            failure_fingerprint=state.get("consecutive_failure_fingerprint"),
             staged_file_paths=[str(path) for path in _allowed_paths(state)],
             goal_directory=str(Path(state["run_directory"]) / "goals" / goal.goal_id),
             repair_history=history,

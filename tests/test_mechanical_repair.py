@@ -286,7 +286,7 @@ def test_g2_mechanical_failures_do_not_call_planner_or_max_replan_finalizer(
     assert "stopped_after_max_replans" not in result["final_answer"]
 
 
-def test_same_result_contract_family_stops_despite_error_and_source_variants(
+def test_distinct_result_contract_fingerprints_do_not_trigger_no_progress(
     tmp_path: Path,
 ) -> None:
     model = ScriptedRoleModel(
@@ -304,7 +304,7 @@ def test_same_result_contract_family_stops_despite_error_and_source_variants(
         }
     )
 
-    result = build_graph(model).invoke(_state(tmp_path))
+    result = build_graph(model).invoke(_state(tmp_path, max_code_repair_attempts=2))
 
     assert result["status"] == "mechanical_execution_failed"
     assert result["replan_count"] == 0
@@ -318,8 +318,16 @@ def test_same_result_contract_family_stops_despite_error_and_source_variants(
     assert [item["consecutive_failure_family_count"] for item in records] == [
         1,
         2,
-        3,
+        1,
     ]
+    assert (
+        records[0]["normalized_failure_fingerprint"]
+        == records[1]["normalized_failure_fingerprint"]
+    )
+    assert (
+        records[1]["normalized_failure_fingerprint"]
+        != records[2]["normalized_failure_fingerprint"]
+    )
     assert len({item["error"] for item in records}) == 2
 
 
@@ -389,9 +397,7 @@ def test_default_no_progress_limit_prevents_eighteen_same_family_repairs(
         }
     )
 
-    result = build_graph(model).invoke(
-        _state(tmp_path, max_code_repair_attempts=50)
-    )
+    result = build_graph(model).invoke(_state(tmp_path, max_code_repair_attempts=50))
 
     assert result["status"] == "mechanical_execution_failed"
     assert result["code_repair_attempts_for_current_goal"] == 2

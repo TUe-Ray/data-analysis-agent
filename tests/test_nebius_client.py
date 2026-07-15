@@ -212,8 +212,9 @@ def test_nebius_raises_typed_error_after_empty_response_retries() -> None:
     client.chat.completions.create.return_value = _response(None)
     model = NebiusRoleModel(client=client, model="test-model")
 
-    with patch("data_analysis_agent.models.time.sleep"), pytest.raises(
-        EmptyModelResponseError, match="after 3 attempts"
+    with (
+        patch("data_analysis_agent.models.time.sleep"),
+        pytest.raises(EmptyModelResponseError, match="after 3 attempts"),
     ):
         model.generate(role="executor", messages=[])
 
@@ -271,3 +272,65 @@ def test_unsupported_schema_is_cached_per_configured_model() -> None:
     changed_model.generate_structured(**arguments)
 
     assert supported_client.chat.completions.create.call_count == 1
+
+
+def test_generic_structured_400_does_not_poison_capability_cache() -> None:
+    NebiusRoleModel.clear_capability_cache()
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    context_error = BadRequestError(
+        "maximum context length exceeded",
+        response=httpx.Response(400, request=request),
+        body={"error": {"message": "maximum context length exceeded"}},
+    )
+    client = Mock()
+    client.base_url = "https://provider-a.test/v1"
+    client.chat.completions.create.side_effect = [
+        context_error,
+        _response('{"ok":true}'),
+    ]
+    model = NebiusRoleModel(client=client, model="shared-model")
+    arguments = {
+        "role": "executor",
+        "messages": [],
+        "schema_name": "python_generation",
+        "schema": PythonGeneration.model_json_schema(),
+    }
+
+    with pytest.raises(BadRequestError, match="context length"):
+        model.generate_structured(**arguments)
+    assert model.generate_structured(**arguments) == '{"ok":true}'
+    assert client.chat.completions.create.call_count == 2
+
+
+def test_schema_capability_cache_is_scoped_to_base_url_and_model() -> None:
+    NebiusRoleModel.clear_capability_cache()
+    request = httpx.Request("POST", "https://provider-a.test/v1/chat/completions")
+    unsupported = BadRequestError(
+        "json_schema structured output is unsupported",
+        response=httpx.Response(400, request=request),
+        body={"error": "json_schema unsupported"},
+    )
+    first = Mock()
+    first.base_url = "https://provider-a.test/v1/"
+    first.chat.completions.create.side_effect = unsupported
+    second = Mock()
+    second.base_url = "https://provider-b.test/v1/"
+    second.chat.completions.create.return_value = _response('{"ok":true}')
+    arguments = {
+        "role": "executor",
+        "messages": [],
+        "schema_name": "python_generation",
+        "schema": PythonGeneration.model_json_schema(),
+    }
+
+    with pytest.raises(ModelCapabilityError):
+        NebiusRoleModel(client=first, model="shared-model").generate_structured(
+            **arguments
+        )
+    assert (
+        NebiusRoleModel(client=second, model="shared-model").generate_structured(
+            **arguments
+        )
+        == '{"ok":true}'
+    )
+    assert second.chat.completions.create.call_count == 1

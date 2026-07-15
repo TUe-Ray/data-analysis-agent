@@ -152,7 +152,11 @@ __agent_result__ = {{
         }
     )
     final_checker = json.dumps(
-        {"decision": "PASS", "feedback": "The candidate is complete."}
+        {
+            "decision": "PASS",
+            "repair_scope": "none",
+            "feedback": "The candidate is complete.",
+        }
     )
     one_shot_code = f"""import csv
 import json
@@ -212,9 +216,7 @@ print(json.dumps({{
         "single_agent": [single_agent_generation]
         if approach == "single_agent_checker"
         else [],
-        "final_checker": [final_checker]
-        if approach == "single_agent_checker"
-        else [],
+        "final_checker": [final_checker] if approach == "single_agent_checker" else [],
     }
     return ScriptedRoleModel(responses)  # type: ignore[arg-type]
 
@@ -378,6 +380,7 @@ def run_benchmark(
                     )
                 if outcome.partial_run:
                     grade = None
+                    grading_skip_reason = "Intentional partial-goal smoke run."
                     if renderer:
                         renderer.emit(
                             {
@@ -389,6 +392,7 @@ def run_benchmark(
                         )
                 elif outcome.status == "infrastructure_error":
                     grade = None
+                    grading_skip_reason = "No candidate due to infrastructure error."
                     if renderer:
                         renderer.emit(
                             {
@@ -396,7 +400,23 @@ def run_benchmark(
                                 "message": "Grading skipped — infrastructure error",
                             }
                         )
+                elif outcome.status != "completed" or outcome.candidate is None:
+                    grade = None
+                    grading_skip_reason = (
+                        "No valid task-schema candidate due to internal workflow "
+                        "failure."
+                    )
+                    if renderer:
+                        renderer.emit(
+                            {
+                                "type": "activity",
+                                "message": (
+                                    "Grading skipped — internal workflow failure"
+                                ),
+                            }
+                        )
                 else:
+                    grading_skip_reason = None
                     if renderer:
                         renderer.emit(
                             {"type": "activity", "message": "Grading — starting..."}
@@ -426,13 +446,13 @@ def run_benchmark(
                     else (
                         {
                             "graded": False,
-                            "reason": "Intentional partial-goal smoke run.",
+                            "reason": grading_skip_reason,
                             "target_reached": outcome.partial_run_reached,
                         }
                         if outcome.partial_run
                         else {
-                        "graded": False,
-                        "reason": "No candidate due to infrastructure error.",
+                            "graded": False,
+                            "reason": grading_skip_reason,
                         }
                     )
                 )
@@ -460,7 +480,7 @@ def run_benchmark(
                             if outcome.partial_run
                             else {
                                 "error_category": (
-                                    outcome.error_category or "infrastructure_error"
+                                    outcome.error_category or outcome.status
                                 )
                             }
                         )
@@ -718,8 +738,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.stop_after_goals is not None:
         return int(
             not all(
-                result.partial_run and result.partial_run_reached
-                for result in results
+                result.partial_run and result.partial_run_reached for result in results
             )
         )
     return 0

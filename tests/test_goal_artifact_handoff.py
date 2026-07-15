@@ -5,7 +5,11 @@ from pathlib import Path
 
 from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import ScriptedRoleModel
-from data_analysis_agent.nodes import planner_validator_node
+from data_analysis_agent.nodes import (
+    _artifacts_available_to_current_goal,
+    planner_validator_node,
+    select_current_goal_node,
+)
 
 
 def _plan() -> str:
@@ -137,9 +141,7 @@ def test_unverified_artifact_is_never_approved(tmp_path: Path) -> None:
         }
     )
 
-    result = build_graph(model).invoke(
-        {**_state(tmp_path), "max_replans": 0}
-    )
+    result = build_graph(model).invoke({**_state(tmp_path), "max_replans": 0})
 
     assert result["completed_goal_results"] == []
     assert result.get("approved_goal_artifacts", []) == []
@@ -172,7 +174,7 @@ def test_diagnostic_file_cannot_be_declared_as_an_artifact(tmp_path: Path) -> No
     assert result.get("approved_goal_artifacts", []) == []
 
 
-def test_replan_archives_artifact_from_an_invalidated_producer(tmp_path: Path) -> None:
+def test_replan_rejects_mutating_completed_artifact_producer(tmp_path: Path) -> None:
     (tmp_path / "run").mkdir()
     original_plan = json.loads(_plan())
     revised_plan = {
@@ -211,5 +213,92 @@ def test_replan_archives_artifact_from_an_invalidated_producer(tmp_path: Path) -
 
     updates = planner_validator_node(state)
 
-    assert updates["completed_goal_results"] == []
-    assert updates["approved_goal_artifacts"] == []
+    assert "completed goal ID G1 was reused" in updates["planner_validation_error"]
+
+
+def test_full_scientific_replan_preserves_eight_goals_and_dependency_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    goals = [
+        {
+            "goal_id": f"G{index}",
+            "objective": f"Original goal {index}.",
+            "required_outputs": [f"output {index}"],
+            "constraints": [],
+            "success_criteria": [f"criterion {index}"],
+            "depends_on": [] if index == 1 else [f"G{index - 1}"],
+        }
+        for index in range(1, 12)
+    ]
+    original = {"scientific_objective": "Eleven-step analysis.", "goals": goals}
+    artifact_paths = []
+    for producer in ("G7", "G8"):
+        path = run_directory / "goals" / producer / f"{producer}.csv"
+        path.parent.mkdir(parents=True)
+        path.write_text("value\n1\n", encoding="utf-8")
+        artifact_paths.append(
+            {
+                "artifact_id": f"{producer}:{producer}.csv:" + "0" * 12,
+                "producer_goal_id": producer,
+                "path": str(path),
+                "relative_name": path.name,
+                "media_type": "text/csv",
+                "description": f"verified records from {producer}",
+                "size_bytes": path.stat().st_size,
+                "sha256": "0" * 64,
+            }
+        )
+    invalid_goals = [dict(goal) for goal in goals[:3]]
+    invalid_goals[0]["objective"] = "Unrelated replacement work."
+    state = {
+        "planner_raw_response": json.dumps(
+            {"scientific_objective": "bad residual", "goals": invalid_goals}
+        ),
+        "planner_raw_response_path": str(run_directory / "planner_response_v1.json"),
+        "planner_response_history": [{"version": 1}],
+        "run_directory": str(run_directory),
+        "planner_mode": "scientific_replan",
+        "high_level_plan": original,
+        "completed_goal_results": [
+            {"goal_id": f"G{index}", "success": True} for index in range(1, 9)
+        ],
+        "approved_goal_artifacts": artifact_paths,
+        "planner_repair_count": 0,
+        "replan_count": 1,
+        "trace": [],
+    }
+
+    rejected = planner_validator_node(state)
+    assert "completed goal ID G1 was reused" in rejected["planner_validation_error"]
+
+    revised_goals = [dict(goal) for goal in goals]
+    revised_goals[8] = {
+        **revised_goals[8],
+        "objective": "Revised post-start exclusion using verified selections.",
+        "depends_on": ["G7", "G8"],
+    }
+    full_revised = {
+        "scientific_objective": "Eleven-step analysis.",
+        "goals": revised_goals,
+    }
+    state.update(
+        {
+            "planner_raw_response": json.dumps(full_revised),
+            "planner_response_history": [{"version": 2}],
+            "planner_raw_response_path": str(
+                run_directory / "planner_response_v2.json"
+            ),
+        }
+    )
+    updates = planner_validator_node(state)
+    selected = select_current_goal_node({**state, **updates})
+    available = _artifacts_available_to_current_goal({**state, **updates, **selected})
+
+    assert len(updates["completed_goal_results"]) == 8
+    assert len(updates["approved_goal_artifacts"]) == 2
+    assert updates["current_goal_index"] == 8
+    assert updates["remaining_goal_count"] == 3
+    assert selected["current_goal"]["goal_id"] == "G9"
+    assert {item.producer_goal_id for item in available} == {"G7", "G8"}
