@@ -1,0 +1,13 @@
+exclusion_id,patient_id,effective_date,reason
+E006,P031,2026-03-03,protocol discontinuation
+E001,P005,2026-01-16,pre-existing contraindication
+E004,P037,2026-02-12,pre-existing contraindication
+E011,P011,2026-04-20,later follow-up note
+E005,P011,2026-02-27,protocol discontinuation
+E012,P028,2026-03-05,later follow-up note
+E009,P023,2026-05-19,late administrative exclusion
+E003,P028,2026-01-13,pre-existing contraindication
+E008,P009,2026-04-02,late administrative exclusion
+E010,P039,2026-04-17,late administrative exclusion
+E002,P014,2026-02-11,pre-existing contraindication
+E007,P040,2026-03-31,protocol discontinuation

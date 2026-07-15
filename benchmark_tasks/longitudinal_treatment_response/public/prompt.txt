@@ -1,0 +1,114 @@
+You are analyzing a synthetic longitudinal treatment-response study.
+Use all three supplied CSV files and follow the rules below exactly.
+
+The analysis is descriptive. Do not make a causal claim and do not run a hypothesis test.
+
+1. Normalize treatment arms
+
+Strip surrounding whitespace, compare case-insensitively, and treat underscores as spaces.
+Map the following values to arm A: `A`, `Arm A`, `treatment_a`, `Treatment A`.
+Map the analogous B values to arm B.
+Any other or missing treatment-arm value is ineligible.
+
+2. Basic patient eligibility
+
+A patient passes the basic checks only when all conditions hold:
+- age is between 18 and 75 inclusive;
+- consent, after trimming and case normalization, equals `yes`;
+- treatment arm maps to A or B;
+- `treatment_start_date` is a valid ISO date.
+
+3. Remove exact duplicate visit rows and define a valid visit
+
+First remove exact duplicate rows from `visits.csv` across all columns, keeping the first occurrence.
+A remaining visit row is valid only when:
+- `measurement_status`, after trimming and case normalization, is `valid` or `reviewed`;
+- `value` is present, numeric, and finite;
+- `quality_score` is present, numeric, and finite;
+- `measurement_date` is a valid ISO date.
+
+4. Pre-start exclusions
+
+Among patients who pass the basic checks, exclude a patient before visit selection when any row in
+`exclusions.csv` has `effective_date <= treatment_start_date`.
+
+5. Select one baseline record
+
+For each remaining patient, baseline candidates are valid visits occurring from day -14 through day -1 inclusive,
+where day 0 is the patient's treatment start date.
+Choose the candidate nearest to treatment start (the largest relative day).
+If multiple candidates are on that same day, choose the highest `quality_score`.
+If a tie still remains, choose the lexicographically smallest `record_id`.
+A patient without a valid baseline candidate is removed at this stage.
+
+6. Select one follow-up record
+
+For each patient still remaining, follow-up candidates are valid visits occurring from day 28 through day 42 inclusive.
+Choose the candidate with the smallest absolute distance from day 35.
+Break ties by, in order:
+- higher `quality_score`;
+- earlier measurement date;
+- lexicographically smaller `record_id`.
+A patient without a valid follow-up candidate is removed at this stage.
+
+7. Post-start exclusions
+
+After selecting the follow-up record, exclude the patient when any exclusion has
+`treatment_start_date < effective_date <= selected_followup_date`.
+An exclusion after the selected follow-up date does not remove the patient.
+
+8. Complete-pair analysis
+
+For every remaining patient, calculate:
+`change = followup_value - baseline_value`.
+Use patients, not visit rows, as the observational units.
+
+For each arm separately, report:
+- n;
+- mean baseline value;
+- mean follow-up value;
+- mean change;
+- sample standard deviation of change using denominator n - 1;
+- sample standard error of change, defined as sample SD divided by sqrt(n).
+
+Also report the difference in mean change as:
+`arm B mean change - arm A mean change`.
+
+9. Attrition accounting
+
+Report these exact counts, following the sequential workflow above:
+- `total_patients`;
+- `basic_ineligible`;
+- `eligible_after_basic_checks`;
+- `excluded_pre_start`;
+- `no_valid_baseline`;
+- `no_valid_followup`;
+- `excluded_post_start_before_or_on_followup`;
+- `complete_pairs`;
+- `complete_pairs_arm_a`;
+- `complete_pairs_arm_b`;
+- `exact_duplicate_visit_rows_removed`;
+- `invalid_or_missing_visit_rows_excluded` after exact deduplication.
+
+10. Selected-pair audit trail
+
+Return `selected_pairs` sorted by `patient_id` ascending. Each entry must contain:
+- patient_id;
+- normalized arm (`A` or `B`);
+- selected baseline record ID;
+- selected follow-up record ID;
+- baseline value;
+- follow-up value;
+- change.
+
+11. Output and rounding
+
+Return exactly one JSON object matching the public answer schema.
+Place all computed outputs under `key_results` using exactly these keys:
+- `attrition`;
+- `arm_statistics`;
+- `between_arm_comparison`;
+- `selected_pairs`.
+
+Round floating-point outputs to three decimal places only after completing all selections and calculations.
+Do not include Markdown or text outside the JSON object.
