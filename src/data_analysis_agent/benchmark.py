@@ -417,10 +417,10 @@ def format_benchmark_summary(
                 error
                 for result in results
                 if result.approach == approach
-                for error in (
-                    result.grader_errors
-                    or ([result.run_error] if result.run_error else [])
-                )
+                for error in [
+                    *result.grader_errors,
+                    *([result.run_error] if result.run_error else []),
+                ]
             )
         )
         lines.append(f"{approach}:")

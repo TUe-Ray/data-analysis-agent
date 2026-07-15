@@ -47,6 +47,7 @@ class AgentState(TypedDict, total=False):
     staged_file_display_paths: list[str]
     execution_working_directory: str
     executor_warnings: list[str]
+    policy_failure_reason: str | None
     run_id: str
     run_directory: str
     trusted_tool_calls: int

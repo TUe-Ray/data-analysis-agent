@@ -544,6 +544,36 @@ def test_transport_failure_is_ungraded_infrastructure_error(
     assert json.loads(grade_path.read_text(encoding="utf-8"))["graded"] is False
 
 
+def test_policy_failure_has_its_own_status_and_summary_reason(tmp_path: Path) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=["one_shot_code"],
+    )
+    dynamic_code = (
+        "import pandas as pd\n"
+        "def read(path):\n"
+        "    return pd.read_csv(path)\n"
+        "read('inputs/data.csv')\n"
+    )
+
+    summary, results = run_benchmark(
+        config=config,
+        output_root=tmp_path / "runs",
+        model_factory=lambda approach, public: ScriptedRoleModel(
+            {"one_shot_code": [dynamic_code]}
+        ),
+        project_root=tmp_path,
+    )
+
+    result = results[0]
+    rendered = format_benchmark_summary(summary, results)
+    assert result.status == "python_policy_failure"
+    assert result.error_category == "python_policy"
+    assert "python policy failure" in rendered
+    assert "PythonPolicyError: Dynamic file paths are prohibited" in rendered
+
+
 def test_live_progress_reports_successful_model_and_grading_stages(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

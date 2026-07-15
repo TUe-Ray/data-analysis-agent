@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
@@ -69,6 +70,9 @@ WRITE_METHODS = {
     "savefig",
 }
 READ_METHODS = {"read_csv", "read_table", "read_text", "read_bytes", "loadtxt"}
+PATH_DISCOVERY_CALLS = {"glob", "rglob", "iterdir", "walk", "scandir", "listdir"}
+
+StaticPathValue: TypeAlias = str | dict[str, str]
 
 
 class PythonExecutionResult(BaseModel):
@@ -93,21 +97,127 @@ class PythonPolicyError(ValueError):
     """Raised when generated source violates the prototype AST policy."""
 
 
-def _literal_path(
-    node: ast.AST | None, constants: dict[str, str] | None = None
-) -> str | None:
+def _static_path_value(
+    node: ast.AST | None, bindings: dict[str, StaticPathValue]
+) -> StaticPathValue | None:
+    """Resolve only source-level constants; never execute generated expressions."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
-    if isinstance(node, ast.Name) and constants is not None:
-        return constants.get(node.id)
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id)
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "Path"
         and node.args
     ):
-        return _literal_path(node.args[0], constants)
+        value = _static_path_value(node.args[0], bindings)
+        return value if isinstance(value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _static_path_value(node.left, bindings)
+        right = _static_path_value(node.right, bindings)
+        if isinstance(left, str) and isinstance(right, str):
+            return str(Path(left) / right)
+        return None
+    if isinstance(node, ast.Dict):
+        resolved: dict[str, str] = {}
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                return None
+            resolved_value = _static_path_value(value, bindings)
+            if not isinstance(resolved_value, str):
+                return None
+            resolved[key.value] = resolved_value
+        return resolved
+    if isinstance(node, ast.Subscript):
+        mapping = _static_path_value(node.value, bindings)
+        key = node.slice
+        if (
+            isinstance(mapping, dict)
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+        ):
+            return mapping.get(key.value)
     return None
+
+
+def _static_path(
+    node: ast.AST | None, bindings: dict[str, StaticPathValue]
+) -> str | None:
+    value = _static_path_value(node, bindings)
+    return value if isinstance(value, str) else None
+
+
+def _scope_for(
+    node: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> ast.Module | ast.FunctionDef | ast.AsyncFunctionDef:
+    """Return the lexical module/function scope containing an expression."""
+    current = node
+    while current in parents:
+        current = parents[current]
+        if isinstance(current, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+            return current
+    raise PythonPolicyError("Unable to determine generated-code scope")
+
+
+def _scope_bindings(
+    scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    before_line: int,
+    parents: dict[ast.AST, ast.AST],
+) -> dict[str, StaticPathValue]:
+    """Resolve only unconditional earlier assignments in the lexical scope."""
+    bindings: dict[str, StaticPathValue] = {}
+    if not isinstance(scope, ast.Module):
+        outer = _scope_for(scope, parents)
+        bindings.update(
+            _scope_bindings(
+                outer,
+                before_line=scope.lineno,
+                parents=parents,
+            )
+        )
+        for argument in (
+            *scope.args.posonlyargs,
+            *scope.args.args,
+            *scope.args.kwonlyargs,
+        ):
+            bindings.pop(argument.arg, None)
+        if scope.args.vararg:
+            bindings.pop(scope.args.vararg.arg, None)
+        if scope.args.kwarg:
+            bindings.pop(scope.args.kwarg.arg, None)
+    for statement in scope.body:
+        if statement.lineno >= before_line:
+            break
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = (
+            statement.targets
+            if isinstance(statement, ast.Assign)
+            else [statement.target]
+        )
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        value = _static_path_value(statement.value, bindings)
+        if value is not None:
+            bindings[targets[0].id] = value
+        else:
+            bindings.pop(targets[0].id, None)
+    return bindings
+
+
+def _path_for_call(
+    node: ast.AST | None,
+    *,
+    call: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+) -> str | None:
+    scope = _scope_for(call, parents)
+    return _static_path(
+        node,
+        _scope_bindings(scope, before_line=call.lineno, parents=parents),
+    )
 
 
 def _within(path: Path, roots: list[Path]) -> bool:
@@ -131,24 +241,40 @@ def validate_generated_code(
     working_root = (working_directory or run_directory).resolve()
     allowed = {path.resolve() for path in allowed_files}
     standard_library = set(getattr(sys, "stdlib_module_names", ()))
-    constants: dict[str, str] = {}
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "environ":
+            raise PythonPolicyError("Environment-variable access is prohibited")
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else None
+        )
+        if call_name in BANNED_CALLS:
+            raise PythonPolicyError(f"Prohibited call: {call_name}")
+        if call_name in PATH_DISCOVERY_CALLS:
+            raise PythonPolicyError(f"Path discovery is prohibited: {call_name}")
     path_variables: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(
             node.value, ast.AST
         ):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            value = _literal_path(node.value, constants)
-            if value is not None:
-                for target in targets:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = value
-                        if (
-                            isinstance(node.value, ast.Call)
-                            and isinstance(node.value.func, ast.Name)
-                            and node.value.func.id == "Path"
-                        ):
-                            path_variables.add(target.id)
+            for target in targets:
+                if isinstance(target, ast.Name) and (
+                    isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "Path"
+                ):
+                    path_variables.add(target.id)
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -174,6 +300,8 @@ def validate_generated_code(
             call_name = node.func.attr
         if call_name in BANNED_CALLS:
             raise PythonPolicyError(f"Prohibited call: {call_name}")
+        if call_name in PATH_DISCOVERY_CALLS:
+            raise PythonPolicyError(f"Path discovery is prohibited: {call_name}")
         if call_name in FILE_MUTATION_CALLS:
             receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
             filesystem_receiver = (
@@ -195,19 +323,19 @@ def validate_generated_code(
         if call_name == "open":
             is_path_method = isinstance(node.func, ast.Attribute)
             supplied = (
-                _literal_path(node.func.value, constants)
+                _path_for_call(node.func.value, call=node, parents=parents)
                 if is_path_method
-                else _literal_path(path_argument, constants)
+                else _path_for_call(path_argument, call=node, parents=parents)
             )
             mode_index = 0 if is_path_method else 1
             mode = (
-                _literal_path(node.args[mode_index], constants)
+                _path_for_call(node.args[mode_index], call=node, parents=parents)
                 if len(node.args) > mode_index
                 else "r"
             )
             for keyword in node.keywords:
                 if keyword.arg == "mode":
-                    mode = _literal_path(keyword.value, constants)
+                    mode = _path_for_call(keyword.value, call=node, parents=parents)
             if supplied is not None:
                 resolved = (working_root / supplied).resolve()
                 if any(flag in (mode or "r") for flag in "wax+"):
@@ -219,10 +347,10 @@ def validate_generated_code(
                 raise PythonPolicyError("Dynamic file paths are prohibited")
         elif call_name in WRITE_METHODS:
             supplied = (
-                _literal_path(node.func.value, constants)
+                _path_for_call(node.func.value, call=node, parents=parents)
                 if isinstance(node.func, ast.Attribute)
                 and call_name in {"write_text", "write_bytes"}
-                else _literal_path(path_argument, constants)
+                else _path_for_call(path_argument, call=node, parents=parents)
             )
             if supplied is not None:
                 resolved = (working_root / supplied).resolve()
@@ -232,10 +360,10 @@ def validate_generated_code(
                 raise PythonPolicyError("Dynamic file paths are prohibited")
         elif call_name in READ_METHODS:
             supplied = (
-                _literal_path(node.func.value, constants)
+                _path_for_call(node.func.value, call=node, parents=parents)
                 if isinstance(node.func, ast.Attribute)
                 and call_name in {"read_text", "read_bytes"}
-                else _literal_path(path_argument, constants)
+                else _path_for_call(path_argument, call=node, parents=parents)
             )
             if supplied is not None:
                 resolved = (working_root / supplied).resolve()

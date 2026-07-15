@@ -290,6 +290,8 @@ def run_one_shot_code(
             candidate = None
             if execution.timed_out:
                 status = "timed_out"
+            elif (execution.error or "").startswith("PythonPolicyError:"):
+                status = "python_policy_failure"
             elif (execution.error or "").startswith("Invalid JSON output"):
                 status = "invalid_json"
             else:
@@ -314,7 +316,13 @@ def run_one_shot_code(
         timed_out=execution.timed_out if execution else False,
         generated_script_count=1 if execution else 0,
         run_error=error,
-        error_category=("transport_api" if status == "infrastructure_error" else None),
+        error_category=(
+            "transport_api"
+            if status == "infrastructure_error"
+            else "python_policy"
+            if status == "python_policy_failure"
+            else None
+        ),
         exception_class=(exception_class if status == "infrastructure_error" else None),
     )
 
@@ -388,8 +396,19 @@ def run_agent(
         candidate = result.get("validated_final_answer")
         if candidate is not None:
             _save_json(run_directory / "candidate.json", candidate)
-        status = "completed" if result.get("status") == "completed" else "error"
-        error = None if status == "completed" else str(result.get("status"))
+        workflow_status = str(result.get("status"))
+        status = (
+            "completed"
+            if workflow_status == "completed"
+            else "python_policy_failure"
+            if workflow_status == "python_policy_failure"
+            else "error"
+        )
+        error = (
+            None
+            if status == "completed"
+            else str(result.get("policy_failure_reason") or workflow_status)
+        )
         execution = json.loads(result.get("execution_result", "{}"))
         exit_code = execution.get("exit_code") if isinstance(execution, dict) else None
         timed_out = (
@@ -434,7 +453,13 @@ def run_agent(
         local_repair_count=repairs,
         global_replan_count=replans,
         run_error=error,
-        error_category=("transport_api" if status == "infrastructure_error" else None),
+        error_category=(
+            "transport_api"
+            if status == "infrastructure_error"
+            else "python_policy"
+            if status == "python_policy_failure"
+            else None
+        ),
         exception_class=(exception_class if status == "infrastructure_error" else None),
         verifier_decisions=decisions,
     )

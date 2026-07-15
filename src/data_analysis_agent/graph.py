@@ -20,6 +20,7 @@ from data_analysis_agent.nodes import (
     max_replan_failure_node,
     output_failure_node,
     output_validator_node,
+    python_policy_failure_node,
     select_current_goal_node,
 )
 from data_analysis_agent.python_runner import LocalPythonRunner
@@ -45,6 +46,11 @@ def route_after_verification(
             return "planner"
         return "failure_finalizer"
     raise RuntimeError("Verifier did not provide a routing decision")
+
+
+def route_after_execution(state: AgentState) -> Literal["verifier", "policy_failure"]:
+    """Keep local AST-policy blocks out of scientific verification and replanning."""
+    return "policy_failure" if state.get("policy_failure_reason") else "verifier"
 
 
 def route_after_output_validation(
@@ -80,12 +86,17 @@ def build_graph(
     workflow.add_node("output_validator", output_validator_node)
     workflow.add_node("output_repair", make_output_repair_node(output_provider))
     workflow.add_node("failure_finalizer", max_replan_failure_node)
+    workflow.add_node("policy_failure", python_policy_failure_node)
     workflow.add_node("output_failure", output_failure_node)
 
     workflow.add_edge(START, "planner")
     workflow.add_edge("planner", "select_current_goal")
     workflow.add_edge("select_current_goal", "executor")
-    workflow.add_edge("executor", "verifier")
+    workflow.add_conditional_edges(
+        "executor",
+        route_after_execution,
+        {"verifier": "verifier", "policy_failure": "policy_failure"},
+    )
     workflow.add_conditional_edges(
         "verifier",
         route_after_verification,
@@ -108,5 +119,6 @@ def build_graph(
     )
     workflow.add_edge("output_repair", "output_validator")
     workflow.add_edge("failure_finalizer", END)
+    workflow.add_edge("policy_failure", END)
     workflow.add_edge("output_failure", END)
     return workflow.compile()

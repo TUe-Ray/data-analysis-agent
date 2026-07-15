@@ -29,13 +29,18 @@ the supplied fixed scientific goal. Use only the standard library, pandas, numpy
 or scipy when already installed. Read only the explicitly allowed staged files,
 write only below the assigned goal directory, do not access the network,
 environment variables, subprocesses, shells, or package installers, and do not
-delete files. Print one JSON object as the final non-empty stdout line. Return only
-Python source code without Markdown fences or explanation."""
+delete files. Prefer direct literal staged paths, for example
+pd.read_csv("inputs/patients.csv"). Dynamically constructed file paths may be
+rejected, including paths built from __file__, os.path, environment values, loops,
+globbing, or function parameters. Print one JSON object as the final non-empty
+stdout line. Return only Python source code without Markdown fences or explanation."""
 
 PYTHON_REPAIR_SYSTEM_PROMPT = """Repair one mechanically failing generated Python
 script. Preserve the exact goal, required outputs, constraints, and scientific
 method. Fix implementation only. Use only the stated libraries and files. Return
-only complete Python source code without Markdown fences or explanation."""
+only complete Python source code without Markdown fences or explanation. If the
+failure is PythonPolicyError, use the exact allowed staged paths as direct literals
+(for example pd.read_csv("inputs/patients.csv")); do not construct paths dynamically."""
 
 VERIFIER_SYSTEM_PROMPT = """You are the independent scientific Verifier.
 Judge only the supplied original question, any supplied input context or scientific
@@ -157,6 +162,8 @@ def build_python_generation_messages(
             "content": (
                 f"Current IntermediateGoal:\n{json.dumps(current_goal)}\n\n"
                 f"Allowed input files:\n{json.dumps(staged_file_paths)}\n\n"
+                "Use those paths directly as string literals when reading data; "
+                'for example pd.read_csv("inputs/patients.csv").\n\n'
                 "Completed prerequisite results:\n"
                 f"{json.dumps(completed_goal_results)}\n\n"
                 f"Assigned goal directory:\n{goal_directory}"
@@ -186,7 +193,12 @@ def build_python_repair_messages(
                 f"stderr:\n{stderr}\n\n"
                 f"Execution error:\n{error or 'none'}\n\n"
                 "Allowed libraries: Python standard library, pandas, numpy, scipy.\n"
-                f"Allowed files:\n{json.dumps(staged_file_paths)}"
+                f"Allowed files:\n{json.dumps(staged_file_paths)}\n\n"
+                "If this is a PythonPolicyError, repair using only the exact paths "
+                "above as direct literals (for example "
+                'pd.read_csv("inputs/patients.csv")). Do not use __file__, '
+                "os.path, environment values, globbing, loops, or function "
+                "parameters to construct input paths."
             ),
         },
     ]

@@ -452,11 +452,17 @@ def make_executor_node(
                 )
             )
             tool_increment = 0
+        policy_failure_reason = (
+            goal_result.error
+            if goal_result.error and goal_result.error.startswith("PythonPolicyError:")
+            else None
+        )
         return {
             "capability_catalog": catalog,
             "current_strategy": strategy.model_dump(mode="json"),
             "current_goal_result": goal_result.model_dump(mode="json"),
             "execution_result": execution_result,
+            "policy_failure_reason": policy_failure_reason,
             "trusted_tool_calls": state.get("trusted_tool_calls", 0) + tool_increment,
             "generated_script_count": state.get("generated_script_count", 0)
             + script_increment,
@@ -705,6 +711,28 @@ def max_replan_failure_node(state: AgentState) -> dict[str, object]:
         "status": "stopped_after_max_replans",
         "final_status": "stopped_after_max_replans",
         "trace": _trace(state, "failure_finalizer:max_replans"),
+    }
+
+
+def python_policy_failure_node(state: AgentState) -> dict[str, object]:
+    """Stop policy-blocked code before it can consume scientific replan budget."""
+    reason = state.get("policy_failure_reason", "PythonPolicyError")
+    failure = FinalFailureAnswer(
+        status="python_policy_failure",
+        answer=None,
+        key_results={},
+        limitations=[
+            "Generated code was blocked by the local file-access policy before "
+            "execution."
+        ],
+        error=str(reason),
+    )
+    return {
+        "final_answer": failure.model_dump_json(indent=2),
+        "validated_final_answer": failure.model_dump(mode="json"),
+        "status": "python_policy_failure",
+        "final_status": "python_policy_failure",
+        "trace": _trace(state, "failure_finalizer:python_policy"),
     }
 
 

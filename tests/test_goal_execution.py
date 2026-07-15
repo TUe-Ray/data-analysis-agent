@@ -93,6 +93,61 @@ def test_generated_python_failure_terminates_without_approved_results(
     ]
 
 
+def test_python_policy_failure_skips_verifier_and_global_replan(tmp_path: Path) -> None:
+    plan = json.dumps(
+        {
+            "scientific_objective": "Read one staged file.",
+            "goals": [
+                {
+                    "goal_id": "read_input",
+                    "objective": "Read one staged file.",
+                    "required_outputs": ["rows"],
+                    "constraints": [],
+                    "success_criteria": ["A row count is returned."],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    strategy = json.dumps(
+        {
+            "strategy": "generated_python",
+            "capability_name": None,
+            "arguments": {},
+            "concise_reason": "Read the staged input.",
+        }
+    )
+    blocked_code = (
+        "import pandas as pd\n"
+        "def read(path):\n"
+        "    return pd.read_csv(path)\n"
+        "read('inputs/patients.csv')\n"
+    )
+    model = ScriptedRoleModel(
+        {"planner": [plan], "executor": [strategy, blocked_code, blocked_code]}
+    )
+
+    result = build_graph(model).invoke(
+        {
+            "question": "Read one staged file.",
+            "file_paths": ["patients.csv"],
+            "staged_file_paths": [str((tmp_path / "inputs/patients.csv").resolve())],
+            "staged_file_display_paths": ["inputs/patients.csv"],
+            "execution_working_directory": str(tmp_path),
+            "input_context": "Public input only.",
+            "run_directory": str(tmp_path / "run"),
+            "replan_count": 0,
+            "max_replans": 1,
+            "trace": [],
+        }
+    )
+
+    assert result["status"] == "python_policy_failure"
+    assert result["replan_count"] == 0
+    assert result["policy_failure_reason"].startswith("PythonPolicyError:")
+    assert [call.role for call in model.calls].count("verifier") == 0
+
+
 def test_structured_verifier_context_excludes_raw_input_and_role_history(
     tmp_path: Path,
 ) -> None:

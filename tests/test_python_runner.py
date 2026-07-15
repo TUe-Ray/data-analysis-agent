@@ -144,6 +144,88 @@ def test_runner_accepts_exact_staged_relative_pandas_path(tmp_path: Path) -> Non
     assert result.result == {"rows": 1}
 
 
+@pytest.mark.parametrize(
+    "path_expression",
+    [
+        "'inputs/patients.csv'",
+        "PATIENTS_PATH",
+        "Path('inputs') / 'patients.csv'",
+        "INPUTS / 'patients.csv'",
+        "PATHS['patients']",
+    ],
+)
+def test_runner_accepts_statically_resolvable_staged_paths(
+    tmp_path: Path, path_expression: str
+) -> None:
+    attempt = tmp_path / "attempt"
+    staged = attempt / "inputs/patients.csv"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("patient_id\nP001\n", encoding="utf-8")
+    code = (
+        "import json\n"
+        "import pandas as pd\n"
+        "from pathlib import Path\n"
+        "PATIENTS_PATH = 'inputs/patients.csv'\n"
+        "INPUTS = Path('inputs')\n"
+        "PATHS = {'patients': 'inputs/patients.csv'}\n"
+        f"frame = pd.read_csv({path_expression})\n"
+        "print(json.dumps({'rows': len(frame)}))\n"
+    )
+
+    result = LocalPythonRunner().run(
+        code=code,
+        goal_directory=attempt / "execution",
+        working_directory=attempt,
+        allowed_files=[staged.resolve()],
+        version=1,
+    )
+
+    assert result.success
+    assert result.result == {"rows": 1}
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        (
+            "import pandas as pd\n"
+            "for path in ['inputs/patients.csv']:\n"
+            "    pd.read_csv(path)\n"
+            "print('{}')\n",
+            "Dynamic file paths",
+        ),
+        (
+            "import os\nimport pandas as pd\n"
+            "pd.read_csv(os.environ['DATA_PATH'])\nprint('{}')\n",
+            "Environment-variable access",
+        ),
+        (
+            "import glob\nimport pandas as pd\n"
+            "pd.read_csv(glob.glob('inputs/*.csv')[0])\nprint('{}')\n",
+            "Path discovery",
+        ),
+    ],
+)
+def test_runner_rejects_dynamic_or_discovered_read_paths(
+    tmp_path: Path, code: str, reason: str
+) -> None:
+    attempt = tmp_path / "attempt"
+    staged = attempt / "inputs/patients.csv"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("patient_id\nP001\n", encoding="utf-8")
+
+    result = LocalPythonRunner().run(
+        code=code,
+        goal_directory=attempt / "execution",
+        working_directory=attempt,
+        allowed_files=[staged.resolve()],
+        version=1,
+    )
+
+    assert not result.success
+    assert reason in (result.error or "")
+
+
 def test_runner_rejects_unstaged_basename_when_only_inputs_path_is_staged(
     tmp_path: Path,
 ) -> None:
@@ -213,3 +295,44 @@ def test_policy_still_rejects_filesystem_replace(tmp_path: Path, code: str) -> N
 
     assert not result.success
     assert "Prohibited file operation: replace" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        (
+            "import pandas as pd\n"
+            "def load_csv(path):\n"
+            "    return pd.read_csv(path)\n"
+            "load_csv('inputs/patients.csv')\n"
+        ),
+        (
+            "from pathlib import Path\nimport pandas as pd\n"
+            "base = Path(__file__).parent\n"
+            "pd.read_csv(base / 'inputs' / 'patients.csv')\n"
+        ),
+        (
+            "import os\nimport pandas as pd\n"
+            "path = os.path.join('inputs', 'patients.csv')\n"
+            "pd.read_csv(path)\n"
+        ),
+    ],
+)
+def test_previous_dynamic_generated_path_patterns_remain_blocked(
+    tmp_path: Path, code: str
+) -> None:
+    attempt = tmp_path / "attempt"
+    staged = attempt / "inputs/patients.csv"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("patient_id\nP001\n", encoding="utf-8")
+
+    result = LocalPythonRunner().run(
+        code=code,
+        goal_directory=attempt / "execution",
+        working_directory=attempt,
+        allowed_files=[staged.resolve()],
+        version=1,
+    )
+
+    assert not result.success
+    assert "Dynamic file paths" in (result.error or "")

@@ -13,6 +13,7 @@ AttemptStatus = Literal[
     "wrong_answer",
     "invalid_json",
     "execution_failed",
+    "python_policy_failure",
     "timed_out",
     "infrastructure_error",
     "not_applicable",

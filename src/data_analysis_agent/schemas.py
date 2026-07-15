@@ -94,6 +94,7 @@ class FinalFailureAnswer(BaseModel):
     status: Literal[
         "stopped_after_max_replans",
         "output_validation_failed",
+        "python_policy_failure",
     ]
     answer: str | None
     key_results: dict[str, JsonValue]
