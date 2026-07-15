@@ -166,11 +166,14 @@ runs/<run_id>/goals/<goal_id>/
     stderr.txt
     execution_result.json
     artifact_metadata.json
-    generated_outputs/
+    generated_outputs/        # only when the script saves an output file
 ```
 
-Versioned stdout, stderr, and execution records are also kept. `runs/` remains
-ignored by Git. Successful scripts are run artifacts for reproducibility,
+Versioned stdout, stderr, and execution records are also kept. Run directories
+are created lazily when the first artifact is written, and empty optional output
+directories are removed. Pytest redirects default run paths into its per-test
+temporary directory. `runs/` remains ignored by Git. Successful scripts are run
+artifacts for reproducibility,
 debugging, and auditability only: they are not registered, trusted, or reused
 across future runs.
 

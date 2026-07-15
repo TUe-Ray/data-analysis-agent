@@ -317,6 +317,24 @@ def test_agent_messages_and_log_never_contain_private_ground_truth(
     assert {call.role for call in model.calls} == {"planner", "executor", "verifier"}
 
 
+def test_failed_agent_call_does_not_leave_empty_agent_run(
+    task, tmp_path: Path, config: BenchmarkConfig
+) -> None:
+    attempt = tmp_path / "attempt"
+    public = stage_public_task(task.public, attempt)
+    model = ScriptedRoleModel({})
+
+    outcome = run_agent(
+        public=public,
+        model=model,
+        run_directory=attempt,
+        config=config,
+    )
+
+    assert outcome.status == "error"
+    assert not (attempt / "agent_run").exists()
+
+
 def test_orchestrator_isolates_attempts_persists_rows_and_summarizes_offline(
     tmp_path: Path,
 ) -> None:

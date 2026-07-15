@@ -87,7 +87,6 @@ def stage_public_task(public: PublicTaskView, destination: Path) -> PublicTaskVi
 
 
 def reset_attempt_directory(path: Path) -> None:
-    """Create a clean per-approach state boundary."""
+    """Remove prior state; public staging creates the directory when needed."""
     if path.exists():
         shutil.rmtree(path)
-    path.mkdir(parents=True)

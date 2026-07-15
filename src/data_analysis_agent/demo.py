@@ -107,12 +107,6 @@ def _offline_inputs(scenario: str) -> tuple[Path, list[Path]]:
 def _create_demo_log_path(output_dir: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
     run_directory = output_dir / f"demo_{timestamp}"
-    try:
-        run_directory.mkdir(parents=True, exist_ok=False)
-    except OSError as error:
-        raise DemoInputError(
-            f"Could not create demo output directory {run_directory}: {error}"
-        ) from error
     return run_directory / "workflow.log"
 
 
@@ -180,6 +174,7 @@ def _write_workflow_log(
         ]
     )
     try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("\n".join(lines), encoding="utf-8")
     except OSError as error:
         raise DemoInputError(

@@ -323,14 +323,7 @@ def calculate_case_agreements(
 
 def _create_run_directory(output_dir: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
-    run_directory = output_dir / f"verifier_eval_{timestamp}"
-    try:
-        run_directory.mkdir(parents=True, exist_ok=False)
-    except OSError as error:
-        raise EvaluationOutputError(
-            f"Could not create evaluation output directory {run_directory}: {error}"
-        ) from error
-    return run_directory
+    return output_dir / f"verifier_eval_{timestamp}"
 
 
 def _write_evaluation_artifacts(run: EvaluationRun, cases_path: Path) -> None:
@@ -392,6 +385,7 @@ def _write_evaluation_artifacts(run: EvaluationRun, cases_path: Path) -> None:
         "temperature": 0,
     }
     try:
+        run.run_directory.mkdir(parents=True, exist_ok=True)
         run.log_path.write_text("\n".join(log_lines), encoding="utf-8")
         run.results_path.write_text(
             json.dumps(results_payload, indent=2, ensure_ascii=False) + "\n",

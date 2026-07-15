@@ -252,7 +252,6 @@ class LocalPythonRunner:
         version: int,
     ) -> PythonExecutionResult:
         goal_directory.mkdir(parents=True, exist_ok=True)
-        (goal_directory / "generated_outputs").mkdir(exist_ok=True)
         script_path = goal_directory / f"generated_code_v{version}.py"
         script_path.write_text(code, encoding="utf-8")
         started = time.perf_counter()
@@ -317,9 +316,15 @@ class LocalPythonRunner:
         (goal_directory / "stdout.txt").write_text(stdout, encoding="utf-8")
         (goal_directory / "stderr.txt").write_text(stderr, encoding="utf-8")
         artifact_paths = [str(script_path), str(stdout_path), str(stderr_path)]
-        for output_path in sorted((goal_directory / "generated_outputs").glob("*")):
+        generated_outputs = goal_directory / "generated_outputs"
+        for output_path in sorted(generated_outputs.glob("*")):
             if output_path.is_file():
                 artifact_paths.append(str(output_path))
+        try:
+            generated_outputs.rmdir()
+        except OSError:
+            # Preserve the directory whenever a script actually saved anything.
+            pass
         result = PythonExecutionResult(
             success=error_message is None,
             version=version,

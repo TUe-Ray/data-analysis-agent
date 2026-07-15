@@ -164,7 +164,6 @@ def make_planner_node(model: RoleModel) -> Node:
         run_directory = state.get("run_directory") or str(
             Path.cwd() / "runs" / f"run_{run_id}"
         )
-        Path(run_directory).mkdir(parents=True, exist_ok=True)
         return {
             "plan": raw_plan,
             "high_level_plan": plan.model_dump(mode="json"),

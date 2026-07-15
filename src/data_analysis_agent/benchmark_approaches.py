@@ -260,7 +260,6 @@ def run_agent(
     """Invoke the existing full Planner/Executor/Verifier workflow from scratch."""
     recorder = RecordingRoleModel(model)
     agent_directory = run_directory / "agent_run"
-    agent_directory.mkdir()
     try:
         result = cast(
             AgentState,
@@ -285,6 +284,7 @@ def run_agent(
                 }
             ),
         )
+        agent_directory.mkdir(parents=True, exist_ok=True)
         write_workflow_log(
             log_path=agent_directory / "workflow.log",
             result=result,

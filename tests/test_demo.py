@@ -30,6 +30,16 @@ def test_missing_example_file_produces_clear_error(tmp_path: Path) -> None:
         stage_input_files([missing])
 
 
+def test_demo_output_directory_is_created_only_when_log_is_written(
+    tmp_path: Path,
+) -> None:
+    from data_analysis_agent.demo import _create_demo_log_path
+
+    log_path = _create_demo_log_path(tmp_path / "runs")
+
+    assert not log_path.parent.exists()
+
+
 @pytest.mark.parametrize("scenario", ["happy", "replan", "max-replan"])
 def test_offline_demo_does_not_load_or_construct_live_client(scenario: str) -> None:
     with (

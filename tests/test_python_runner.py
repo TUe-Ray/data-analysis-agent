@@ -18,6 +18,7 @@ def test_runner_captures_success_and_saves_artifacts(tmp_path: Path) -> None:
     assert Path(result.script_path).is_file()
     assert (tmp_path / "goal/execution_result.json").is_file()
     assert (tmp_path / "goal/stdout.txt").read_text(encoding="utf-8")
+    assert not (tmp_path / "goal/generated_outputs").exists()
 
 
 def test_runner_handles_timeout(tmp_path: Path) -> None:
@@ -96,3 +97,23 @@ def test_runner_rejects_dynamic_read_paths(tmp_path: Path) -> None:
 
     assert not result.success
     assert "Dynamic file paths" in (result.error or "")
+    assert not (tmp_path / "goal/generated_outputs").exists()
+
+
+def test_runner_preserves_nonempty_generated_outputs(tmp_path: Path) -> None:
+    goal = tmp_path / "goal"
+    result = LocalPythonRunner().run(
+        code=(
+            "from pathlib import Path\n"
+            "import json\n"
+            "Path('generated_outputs').mkdir()\n"
+            "Path('generated_outputs/result.json').write_text("
+            "json.dumps({'result': 2.0}), encoding='utf-8')\n"
+        ),
+        goal_directory=goal,
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    assert (goal / "generated_outputs/result.json").is_file()

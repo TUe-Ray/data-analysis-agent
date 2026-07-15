@@ -1,4 +1,5 @@
 from collections import Counter
+from pathlib import Path
 
 from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import ScriptedRoleModel, build_scripted_model
@@ -40,7 +41,7 @@ def test_graph_compiles_successfully() -> None:
     }.issubset(graph.get_graph().nodes)
 
 
-def test_happy_path_reaches_finalize_with_pass() -> None:
+def test_happy_path_reaches_finalize_with_pass(tmp_path: Path) -> None:
     model = build_scripted_model("happy")
     result = build_graph(model).invoke(initial_state())
 
@@ -55,6 +56,8 @@ def test_happy_path_reaches_finalize_with_pass() -> None:
         "output_validator:VALID",
     ]
     assert role_counts(model) == {"planner": 1, "executor": 1, "verifier": 1}
+    assert not Path(result["run_directory"]).exists()
+    assert not (tmp_path / "runs").exists()
 
 
 def test_replan_routes_back_and_recovers() -> None:
