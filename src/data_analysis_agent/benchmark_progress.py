@@ -136,7 +136,7 @@ class BenchmarkProgressRenderer:
         visible_goal_ids = {goal["goal_id"] for goal in self.goals}
         visible_completed = self.completed & visible_goal_ids
         lines = [f"Planner proposed {len(self.goals)} steps"]
-        for goal in self.goals:
+        for index, goal in enumerate(self.goals, start=1):
             marker = (
                 "✓"
                 if goal["goal_id"] in visible_completed
@@ -144,19 +144,24 @@ class BenchmarkProgressRenderer:
                 if goal["goal_id"] == self.current_goal
                 else " "
             )
-            lines.append(f"{marker} {goal['goal_id']} — {goal['objective']}")
+            lines.append(f"{marker} G{index} — {goal['objective']}")
         lines.append(f"Progress: [{len(visible_completed)}/{len(self.goals)}]")
         return lines
 
     def _current_title(self) -> str | None:
         if self.current_goal is None:
             return None
-        goal = next(
-            (item for item in self.goals if item["goal_id"] == self.current_goal), None
+        goal_index, goal = next(
+            (
+                (index, item)
+                for index, item in enumerate(self.goals, start=1)
+                if item["goal_id"] == self.current_goal
+            ),
+            (None, None),
         )
-        if goal is None:
+        if goal is None or goal_index is None:
             return None
-        return f"Current step: {goal['goal_id']} — {goal['objective']}"
+        return f"Current step: G{goal_index} — {goal['objective']}"
 
     def _redraw(self) -> None:
         lines = [*self.header]
@@ -183,9 +188,17 @@ class BenchmarkProgressRenderer:
             goal = next(
                 (item for item in self.goals if item["goal_id"] == goal_id), None
             )
+            goal_index = next(
+                (
+                    index
+                    for index, item in enumerate(self.goals, start=1)
+                    if item["goal_id"] == goal_id
+                ),
+                None,
+            )
             lines = (
-                [f"✓ {goal_id} — {goal['objective']}", *self._progress_lines()[-1:]]
-                if goal
+                [f"✓ G{goal_index} — {goal['objective']}", *self._progress_lines()[-1:]]
+                if goal and goal_index is not None
                 else []
             )
         elif kind in {"activity", "error", "workflow_failed"}:

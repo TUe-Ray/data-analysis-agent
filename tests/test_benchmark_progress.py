@@ -156,10 +156,14 @@ def test_agent_progress_stream_uses_approved_plan_without_ansi(tmp_path: Path) -
     )
 
     output = stream.getvalue()
+    assert "Planner — started; generating plan steps..." in output
+    assert "Planner — plan generated in" in output
     assert "Planner proposed 1 steps" in output
+    assert "→ G1 — Compute the mean absolute successive difference" in output
     assert "Progress: [0/1]" in output
-    assert "✓ compute_successive_difference" in output
+    assert "✓ G1 — Compute the mean absolute successive difference" in output
     assert "Progress: [1/1]" in output
+    assert output.index("Planner — started") < output.index("Planner proposed 1 steps")
     assert "\x1b" not in output
 
 
@@ -195,7 +199,8 @@ def test_new_plan_replaces_stale_goals_completion_and_current_state() -> None:
     assert renderer.current_goal == "G2"
     assert renderer.scientific_replan_count == 1
     lines = renderer._progress_lines()
-    assert all("G1" not in line for line in lines)
+    assert all("Old completed goal" not in line for line in lines)
+    assert "→ G1 — Revised current goal" in lines
     assert sum(line.startswith("✓") for line in lines) == 0
     assert lines[-1] == "Progress: [0/2]"
 
