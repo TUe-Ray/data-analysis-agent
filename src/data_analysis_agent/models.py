@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import ClassVar, Literal, Protocol
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
@@ -27,6 +27,21 @@ class RoleModel(Protocol):
         """Generate one response for a role-specific message context."""
         ...
 
+    def generate_structured(
+        self,
+        *,
+        role: Role,
+        messages: list[dict[str, str]],
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> str:
+        """Generate a response under a provider-enforced strict JSON Schema."""
+        ...
+
+
+class ModelCapabilityError(RuntimeError):
+    """Raised when a configured model cannot enforce required structured output."""
+
 
 @dataclass(frozen=True)
 class ModelCall:
@@ -34,6 +49,7 @@ class ModelCall:
 
     role: Role
     messages: list[dict[str, str]]
+    structured_schema_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,8 +82,33 @@ class ScriptedRoleModel:
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Return the next scripted response and record the isolated context."""
+        return self._next(role=role, messages=messages, schema_name=None)
+
+    def generate_structured(
+        self,
+        *,
+        role: Role,
+        messages: list[dict[str, str]],
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> str:
+        """Use scripted JSON while recording that a strict contract was requested."""
+        del schema
+        return self._next(role=role, messages=messages, schema_name=schema_name)
+
+    def _next(
+        self,
+        *,
+        role: Role,
+        messages: list[dict[str, str]],
+        schema_name: str | None,
+    ) -> str:
         self.calls.append(
-            ModelCall(role=role, messages=[dict(message) for message in messages])
+            ModelCall(
+                role=role,
+                messages=[dict(message) for message in messages],
+                structured_schema_name=schema_name,
+            )
         )
         position = self._positions[role]
         responses = self._responses.get(role, [])
@@ -79,6 +120,8 @@ class ScriptedRoleModel:
 
 class NebiusRoleModel:
     """Use one configured Nebius model for each V0 role."""
+
+    _json_schema_capabilities: ClassVar[dict[str, bool]] = {}
 
     def __init__(
         self,
@@ -101,6 +144,58 @@ class NebiusRoleModel:
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Send a role-specific request through the OpenAI-compatible client."""
         del role
+        return self._request(messages=messages)
+
+    def generate_structured(
+        self,
+        *,
+        role: Role,
+        messages: list[dict[str, str]],
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> str:
+        """Require strict provider-native JSON Schema for executable responses."""
+        del role
+        if self._json_schema_capabilities.get(self._model) is False:
+            raise ModelCapabilityError(
+                "model_capability_error: model "
+                f"{self._model!r} does not support strict json_schema output"
+            )
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": schema,
+            },
+        }
+        try:
+            content = self._request(
+                messages=messages,
+                response_format=response_format,
+            )
+        except APIStatusError as error:
+            if error.status_code in {400, 422}:
+                self._json_schema_capabilities[self._model] = False
+                raise ModelCapabilityError(
+                    "model_capability_error: model "
+                    f"{self._model!r} rejected strict json_schema output"
+                ) from error
+            raise
+        self._json_schema_capabilities[self._model] = True
+        return content
+
+    @classmethod
+    def clear_capability_cache(cls) -> None:
+        """Clear cached provider capability facts (primarily for isolated tests)."""
+        cls._json_schema_capabilities.clear()
+
+    def _request(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        response_format: dict[str, object] | None = None,
+    ) -> str:
         self.last_token_usage = None
         self.last_api_request_count = 0
         self.last_transport_retry_count = 0
@@ -114,6 +209,8 @@ class NebiusRoleModel:
             arguments["top_p"] = self._top_p
         if self._max_output_tokens is not None:
             arguments["max_tokens"] = self._max_output_tokens
+        if response_format is not None:
+            arguments["response_format"] = response_format
         for attempt in range(2):
             self.last_api_request_count += 1
             try:
@@ -154,13 +251,46 @@ class RecordingRoleModel:
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Delegate generation and retain a secret-free exchange record."""
+        return self._record(
+            role=role,
+            messages=messages,
+            generate=lambda: self._model.generate(role=role, messages=messages),
+        )
+
+    def generate_structured(
+        self,
+        *,
+        role: Role,
+        messages: list[dict[str, str]],
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> str:
+        """Record a strict structured generation without weakening its contract."""
+        return self._record(
+            role=role,
+            messages=messages,
+            generate=lambda: self._model.generate_structured(
+                role=role,
+                messages=messages,
+                schema_name=schema_name,
+                schema=schema,
+            ),
+        )
+
+    def _record(
+        self,
+        *,
+        role: Role,
+        messages: list[dict[str, str]],
+        generate: Callable[[], str],
+    ) -> str:
         started = time.perf_counter()
         call_number = len(self.exchanges) + 1
         if self._call_observer:
             self._call_observer("start", role, call_number, 0.0, None)
         copied_messages = [dict(message) for message in messages]
         try:
-            response = self._model.generate(role=role, messages=messages)
+            response = generate()
         except Exception as error:
             elapsed = time.perf_counter() - started
             error_text = f"{type(error).__name__}: {error}"
@@ -327,22 +457,33 @@ def build_scripted_model(scenario: str) -> ScriptedRoleModel:
         / "examples/data/measurements_with_missing.csv"
     )
     good_code = f"""import csv
-import json
-
 with open({str(data_path)!r}, encoding="utf-8") as handle:
     values = [float(row["value"]) for row in csv.DictReader(handle) if row["value"]]
 differences = [abs(right - left) for left, right in zip(values, values[1:])]
 result = sum(differences) / len(differences)
-print(json.dumps({{"mean_absolute_successive_difference": result}}))
+__agent_result__ = {{"mean_absolute_successive_difference": result}}
 """
     wrong_column_code = f"""import csv
-import json
-
 with open({str(data_path)!r}, encoding="utf-8") as handle:
     values = [float(row["wrong_value"]) for row in csv.DictReader(handle)]
-print(json.dumps({{"mean_absolute_successive_difference": values[0]}}))
+__agent_result__ = {{"mean_absolute_successive_difference": values[0]}}
 """
     other_wrong_code = wrong_column_code.replace("wrong_value", "still_wrong")
+
+    def generation(code: str) -> str:
+        return json.dumps(
+            {"kind": "python", "code": code, "summary": "Compute the goal."}
+        )
+
+    def repair(code: str) -> str:
+        return json.dumps(
+            {
+                "kind": "python_repair",
+                "code": code,
+                "summary": "Repair the runtime failure.",
+                "addressed_failure_category": "runtime_error",
+            }
+        )
     pass_profile = (
         '{"decision":"PASS","feedback":"The table structure, numeric value '
         'column, and missingness are supported by the profile output."}'
@@ -372,7 +513,7 @@ print(json.dumps({{"mean_absolute_successive_difference": values[0]}}))
         return ScriptedRoleModel(
             {
                 "planner": [structured_python_plan],
-                "executor": [python_strategy, good_code],
+                "executor": [python_strategy, generation(good_code)],
                 "verifier": [pass_python],
             }
         )
@@ -380,7 +521,11 @@ print(json.dumps({{"mean_absolute_successive_difference": values[0]}}))
         return ScriptedRoleModel(
             {
                 "planner": [structured_python_plan],
-                "executor": [python_strategy, wrong_column_code, good_code],
+                "executor": [
+                    python_strategy,
+                    generation(wrong_column_code),
+                    repair(good_code),
+                ],
                 "verifier": [pass_python],
             }
         )
@@ -390,11 +535,9 @@ print(json.dumps({{"mean_absolute_successive_difference": values[0]}}))
                 "planner": [structured_python_plan, structured_python_plan],
                 "executor": [
                     python_strategy,
-                    wrong_column_code,
-                    other_wrong_code,
-                    python_strategy,
-                    wrong_column_code,
-                    other_wrong_code,
+                    generation(wrong_column_code),
+                    repair(other_wrong_code),
+                    repair(wrong_column_code),
                 ],
                 "verifier": [fail_python, fail_python],
             }

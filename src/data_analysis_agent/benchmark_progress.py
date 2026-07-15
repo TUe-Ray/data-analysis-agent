@@ -24,6 +24,9 @@ class ProgressEvent(TypedDict, total=False):
     elapsed: float
     error: str
     goals: list[dict[str, object]]
+    completed_goal_ids: list[str]
+    current_goal_id: str | None
+    scientific_replan_count: int
     goal_id: str
     objective: str
     attempt: int
@@ -63,6 +66,7 @@ class BenchmarkProgressRenderer:
         self.goals: list[dict[str, str]] = []
         self.completed: set[str] = set()
         self.current_goal: str | None = None
+        self.scientific_replan_count = 0
         self.details: list[str] = []
         self.events: list[ProgressEvent] = []
 
@@ -70,7 +74,9 @@ class BenchmarkProgressRenderer:
         """Record and render one event without interpreting workflow semantics."""
         safe_event = {
             key: sanitize_terminal_text(value)
-            if key in {"error", "message", "objective", "goal_id"}
+            if key
+            in {"error", "message", "objective", "goal_id", "current_goal_id"}
+            and value is not None
             else value
             for key, value in event.items()
         }
@@ -104,6 +110,16 @@ class BenchmarkProgressRenderer:
                 }
                 for goal in event.get("goals", [])
             ]
+            self.completed = {
+                str(goal_id) for goal_id in event.get("completed_goal_ids", [])
+            }
+            current_goal_id = event.get("current_goal_id")
+            self.current_goal = (
+                str(current_goal_id) if current_goal_id is not None else None
+            )
+            self.scientific_replan_count = int(
+                event.get("scientific_replan_count", 0)
+            )
         elif kind == "goal_started":
             self.current_goal = str(event["goal_id"])
             self.details = []
@@ -117,17 +133,19 @@ class BenchmarkProgressRenderer:
     def _progress_lines(self) -> list[str]:
         if not self.goals:
             return []
+        visible_goal_ids = {goal["goal_id"] for goal in self.goals}
+        visible_completed = self.completed & visible_goal_ids
         lines = [f"Planner proposed {len(self.goals)} steps"]
         for goal in self.goals:
             marker = (
                 "✓"
-                if goal["goal_id"] in self.completed
+                if goal["goal_id"] in visible_completed
                 else "→"
                 if goal["goal_id"] == self.current_goal
                 else " "
             )
             lines.append(f"{marker} {goal['goal_id']} — {goal['objective']}")
-        lines.append(f"Progress: [{len(self.completed)}/{len(self.goals)}]")
+        lines.append(f"Progress: [{len(visible_completed)}/{len(self.goals)}]")
         return lines
 
     def _current_title(self) -> str | None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import uuid
 from collections.abc import Callable
@@ -37,6 +38,8 @@ from data_analysis_agent.schemas import (
     GoalResult,
     HighLevelPlan,
     IntermediateGoal,
+    PythonGeneration,
+    PythonRepair,
     VerificationOutput,
 )
 from data_analysis_agent.state import AgentState, OutputValidationRecord
@@ -357,7 +360,9 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         "code_repair_attempts_for_current_goal": 0,
         "code_repair_no_progress_count": 0,
         "code_repair_no_progress": False,
+        "consecutive_failure_family": None,
         "generated_execution_history": [],
+        "python_response_history": [],
         "current_generated_code": "",
         "execution_failure_category": None,
     }
@@ -381,33 +386,121 @@ def _registry(state: AgentState) -> TrustedToolRegistry:
     return TrustedToolRegistry(allowed_roots=roots, allowed_files=staged)
 
 
-def _extract_code(raw: str) -> str:
-    stripped = raw.strip()
-    if stripped.startswith("{"):
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict) and isinstance(parsed.get("code"), str):
-            stripped = parsed["code"].strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        stripped = "\n".join(lines).strip()
-    if not stripped:
-        raise ExecutorOutputError("Executor returned empty generated Python")
-    return stripped + "\n"
+class _CanonicalNames(ast.NodeTransformer):
+    """Normalize local identifier spelling for material-change diagnostics."""
+
+    def __init__(self) -> None:
+        self.names: dict[str, str] = {}
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802
+        if node.id == "__agent_result__":
+            return node
+        normalized = self.names.setdefault(node.id, f"name_{len(self.names)}")
+        return ast.copy_location(ast.Name(id=normalized, ctx=node.ctx), node)
+
+    def visit_arg(self, node: ast.arg) -> ast.AST:  # noqa: N802
+        normalized = self.names.setdefault(node.arg, f"name_{len(self.names)}")
+        return ast.copy_location(
+            ast.arg(arg=normalized, annotation=node.annotation), node
+        )
 
 
-def _safe_code(raw: str) -> str:
-    """Keep malformed model output inside the mechanical repair loop."""
+def _canonical_source(code: str) -> str:
+    """Ignore comments, formatting, and local variable spelling when possible."""
     try:
-        return _extract_code(raw)
-    except ExecutorOutputError:
-        return raw.strip() + "\n" if raw.strip() else "\n"
+        tree = _CanonicalNames().visit(ast.parse(code))
+        ast.fix_missing_locations(tree)
+        return ast.dump(tree, include_attributes=False)
+    except SyntaxError:
+        return "".join(
+            line.split("#", 1)[0].strip() for line in code.splitlines()
+        )
+
+
+def _materially_changed(previous: str, current: str) -> bool:
+    return _canonical_source(previous) != _canonical_source(current)
+
+
+def _next_python_version(state: AgentState) -> int:
+    return len(state.get("python_response_history", [])) + 1
+
+
+def _python_contract_response(
+    *,
+    model: RoleModel,
+    state: AgentState,
+    messages: list[dict[str, str]],
+    contract_class: type[PythonGeneration] | type[PythonRepair],
+    artifact_prefix: str,
+) -> tuple[
+    PythonGeneration | PythonRepair | None,
+    int,
+    list[dict[str, object]],
+    list[str],
+    str | None,
+]:
+    """Persist and validate a strict response before any source reaches the runner."""
+    version = _next_python_version(state)
+    goal = IntermediateGoal.model_validate(state["current_goal"])
+    goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
+    goal_directory.mkdir(parents=True, exist_ok=True)
+    raw = model.generate_structured(
+        role="executor",
+        messages=messages,
+        schema_name=artifact_prefix,
+        schema=contract_class.model_json_schema(),
+    )
+    try:
+        contract = contract_class.model_validate_json(raw)
+    except ValidationError as error:
+        raw_path = goal_directory / f"{artifact_prefix}_invalid_v{version}.txt"
+        validation_path = (
+            goal_directory / f"{artifact_prefix}_validation_v{version}.json"
+        )
+        raw_path.write_text(raw, encoding="utf-8")
+        validation_error = f"{type(error).__name__}: {error}"
+        validation_path.write_text(
+            json.dumps(
+                {
+                    "valid": False,
+                    "failure_category": "generation_contract_error",
+                    "error": validation_error,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        history = [
+            *state.get("python_response_history", []),
+            {
+                "version": version,
+                "contract": artifact_prefix,
+                "valid": False,
+                "raw_response_path": str(raw_path),
+                "validation_path": str(validation_path),
+                "error": validation_error,
+            },
+        ]
+        return (
+            None,
+            version,
+            history,
+            [str(raw_path), str(validation_path)],
+            validation_error,
+        )
+    metadata_path = goal_directory / f"{artifact_prefix}_v{version}.json"
+    metadata_path.write_text(contract.model_dump_json(indent=2), encoding="utf-8")
+    history = [
+        *state.get("python_response_history", []),
+        {
+            "version": version,
+            "contract": artifact_prefix,
+            "valid": True,
+            "metadata_path": str(metadata_path),
+            "error": None,
+        },
+    ]
+    return contract, version, history, [str(metadata_path)], None
 
 
 def _generated_execution_update(
@@ -416,32 +509,92 @@ def _generated_execution_update(
     strategy: ExecutionStrategy,
     runner: LocalPythonRunner,
     code: str,
-    source_changed: bool,
+    materially_changed: bool,
     repair_attempts: int,
-    no_progress_count: int,
-    no_progress: bool,
+    version: int,
+    response_artifacts: list[str],
 ) -> dict[str, object]:
     """Run one version and expose only typed execution facts to graph routing."""
     goal = IntermediateGoal.model_validate(state["current_goal"])
     goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
-    staged_paths = _staged_paths(state)
-    existing_versions = [
-        int(path.stem.rsplit("v", 1)[-1])
-        for path in goal_directory.glob("generated_code_v*.py")
-        if path.stem.rsplit("v", 1)[-1].isdigit()
-    ]
-    version = max(existing_versions, default=0) + 1
     final = runner.run(
         code=code,
         goal_directory=goal_directory,
-        allowed_files=staged_paths,
+        allowed_files=_staged_paths(state),
         version=version,
-        working_directory=(
-            Path(state["execution_working_directory"])
-            if state.get("execution_working_directory")
-            else None
-        ),
     )
+    final.artifact_paths = list(
+        dict.fromkeys([*final.artifact_paths, *response_artifacts])
+    )
+    return _finalize_generated_attempt(
+        state=state,
+        strategy=strategy,
+        final=final,
+        code=code,
+        materially_changed=materially_changed,
+        repair_attempts=repair_attempts,
+        generated_script_increment=1,
+    )
+
+
+def _generation_contract_failure_update(
+    *,
+    state: AgentState,
+    strategy: ExecutionStrategy,
+    version: int,
+    error: str,
+    response_artifacts: list[str],
+    repair_attempts: int,
+) -> dict[str, object]:
+    """Represent invalid structured output without ever creating a Python file."""
+    goal = IntermediateGoal.model_validate(state["current_goal"])
+    goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
+    final = PythonExecutionResult(
+        success=False,
+        version=version,
+        exit_code=None,
+        stdout="",
+        stderr="",
+        result={},
+        error=f"GenerationContractError: {error}",
+        duration_seconds=0.0,
+        script_path="",
+        artifact_paths=list(response_artifacts),
+        policy_validated=False,
+        parsed_result=False,
+        failure_category="generation_contract_error",
+        deterministic_result_recovery_attempted=False,
+    )
+    execution_path = goal_directory / f"execution_result_v{version}.json"
+    execution_path.write_text(final.model_dump_json(indent=2), encoding="utf-8")
+    final.artifact_paths.append(str(execution_path))
+    (goal_directory / "execution_result.json").write_text(
+        final.model_dump_json(indent=2), encoding="utf-8"
+    )
+    return _finalize_generated_attempt(
+        state=state,
+        strategy=strategy,
+        final=final,
+        code=state.get("current_generated_code", ""),
+        materially_changed=False,
+        repair_attempts=repair_attempts,
+        generated_script_increment=0,
+    )
+
+
+def _finalize_generated_attempt(
+    *,
+    state: AgentState,
+    strategy: ExecutionStrategy,
+    final: PythonExecutionResult,
+    code: str,
+    materially_changed: bool,
+    repair_attempts: int,
+    generated_script_increment: int,
+) -> dict[str, object]:
+    """Project one execution or generation-contract failure into AgentState."""
+    goal = IntermediateGoal.model_validate(state["current_goal"])
+    goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
     executions = [
         PythonExecutionResult.model_validate(item)
         for item in state.get("generated_execution_history", [])
@@ -492,6 +645,27 @@ def _generated_execution_update(
     no_progress_limit = state.get(
         "max_code_repair_no_progress_attempts", max_no_progress
     )
+    failure_family = final.failure_category
+    if final.success:
+        consecutive_family_count = 0
+        failure_family = None
+    elif failure_family == state.get("consecutive_failure_family"):
+        consecutive_family_count = state.get("code_repair_no_progress_count", 0) + 1
+    else:
+        consecutive_family_count = 1
+    no_progress = (
+        not final.success and consecutive_family_count >= no_progress_limit
+    )
+    factual.update(
+        {
+            "normalized_failure_family": failure_family,
+            "consecutive_failure_family_count": consecutive_family_count,
+            "materially_changed": materially_changed,
+            "deterministic_result_recovery_attempted": (
+                final.deterministic_result_recovery_attempted
+            ),
+        }
+    )
     if final.success:
         next_route = "verifier"
     elif no_progress:
@@ -505,12 +679,18 @@ def _generated_execution_update(
         "version": final.version,
         "attempt": repair_attempts,
         "failure_category": final.failure_category,
+        "normalized_failure_family": failure_family,
+        "consecutive_failure_family_count": consecutive_family_count,
         "exit_code": final.exit_code,
         "timed_out": final.timed_out,
         "policy_validated": final.policy_validated,
         "parsed_result": final.parsed_result,
         "error": final.error,
-        "source_changed": source_changed,
+        "source_changed": materially_changed,
+        "materially_changed": materially_changed,
+        "deterministic_result_recovery_attempted": (
+            final.deterministic_result_recovery_attempted
+        ),
         "route": next_route,
         "code_repair_attempts_for_current_goal": repair_attempts,
         "scientific_replan_count": state.get("replan_count", 0),
@@ -527,16 +707,19 @@ def _generated_execution_update(
         "generated_execution_history": [
             item.model_dump(mode="json") for item in executions
         ],
+        "python_response_history": list(state.get("python_response_history", [])),
         "code_execution_history": [*state.get("code_execution_history", []), record],
         "execution_failure_category": final.failure_category,
         "failure_category": final.failure_category,
         "policy_failure_reason": (
             final.error if final.failure_category == "policy_error" else None
         ),
-        "generated_script_count": state.get("generated_script_count", 0) + 1,
+        "generated_script_count": state.get("generated_script_count", 0)
+        + generated_script_increment,
         "code_repair_attempts_for_current_goal": repair_attempts,
         "max_code_repair_attempts": repair_limit,
-        "code_repair_no_progress_count": no_progress_count,
+        "code_repair_no_progress_count": consecutive_family_count,
+        "consecutive_failure_family": failure_family,
         "max_code_repair_no_progress_attempts": no_progress_limit,
         "code_repair_no_progress": no_progress,
         "trace": _trace(state, trace_event),
@@ -640,22 +823,46 @@ def make_executor_node(
             goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
             source_messages = build_python_generation_messages(
                 current_goal=goal.model_dump(mode="json"),
-                staged_file_paths=_staged_display_paths(state),
+                staged_file_paths=[str(path) for path in _staged_paths(state)],
                 completed_goal_results=list(state.get("completed_goal_results", [])),
                 goal_directory=str(goal_directory),
             )
-            generated = _generated_execution_update(
-                state={**state, "trace": _trace(state, "executor")},
-                strategy=strategy,
-                runner=runner,
-                code=_safe_code(
-                    model.generate(role="executor", messages=source_messages)
-                ),
-                source_changed=True,
-                repair_attempts=0,
-                no_progress_count=0,
-                no_progress=False,
+            contract, version, response_history, artifacts, contract_error = (
+                _python_contract_response(
+                    model=model,
+                    state=state,
+                    messages=source_messages,
+                    contract_class=PythonGeneration,
+                    artifact_prefix="python_generation",
+                )
             )
+            generation_state: AgentState = {
+                **state,
+                "python_response_history": response_history,
+                "trace": _trace(state, "executor"),
+            }
+            if contract is None:
+                generated = _generation_contract_failure_update(
+                    state=generation_state,
+                    strategy=strategy,
+                    version=version,
+                    error=contract_error or "invalid PythonGeneration response",
+                    response_artifacts=artifacts,
+                    repair_attempts=0,
+                )
+            else:
+                if not isinstance(contract, PythonGeneration):
+                    raise AssertionError("unexpected Python generation contract")
+                generated = _generated_execution_update(
+                    state=generation_state,
+                    strategy=strategy,
+                    runner=runner,
+                    code=contract.code,
+                    materially_changed=True,
+                    repair_attempts=0,
+                    version=version,
+                    response_artifacts=artifacts,
+                )
             return {
                 "capability_catalog": catalog,
                 "current_strategy": strategy.model_dump(mode="json"),
@@ -713,39 +920,49 @@ def make_mechanical_repair_node(
             stdout=previous.stdout,
             stderr=previous.stderr,
             error=previous.error,
-            staged_file_paths=_staged_display_paths(state),
+            staged_file_paths=[str(path) for path in _staged_paths(state)],
             goal_directory=str(Path(state["run_directory"]) / "goals" / goal.goal_id),
             repair_history=history,
         )
-        code = _safe_code(model.generate(role="executor", messages=messages))
-        source_changed = code != state.get("current_generated_code", "")
-        same_error = (
-            len(history) > 1
-            and history[-2].get("failure_category") == previous.failure_category
-            and history[-2].get("error") == previous.error
+        contract, version, response_history, artifacts, contract_error = (
+            _python_contract_response(
+                model=model,
+                state=state,
+                messages=messages,
+                contract_class=PythonRepair,
+                artifact_prefix="python_repair",
+            )
         )
-        no_progress_count = (
-            state.get("code_repair_no_progress_count", 0) + 1
-            if not source_changed or same_error
-            else 0
-        )
-        _, default_no_progress = code_repair_settings()
-        no_progress_limit = state.get(
-            "max_code_repair_no_progress_attempts", default_no_progress
-        )
-        updates = _generated_execution_update(
-            state={
-                **state,
-                "trace": _trace(state, f"mechanical_repair:attempt_{attempt}"),
-            },
-            strategy=ExecutionStrategy.model_validate(state["current_strategy"]),
-            runner=runner,
-            code=code,
-            source_changed=source_changed,
-            repair_attempts=attempt,
-            no_progress_count=no_progress_count,
-            no_progress=no_progress_count >= no_progress_limit,
-        )
+        repair_state: AgentState = {
+            **state,
+            "python_response_history": response_history,
+            "trace": _trace(state, f"mechanical_repair:attempt_{attempt}"),
+        }
+        strategy = ExecutionStrategy.model_validate(state["current_strategy"])
+        if contract is None:
+            updates = _generation_contract_failure_update(
+                state=repair_state,
+                strategy=strategy,
+                version=version,
+                error=contract_error or "invalid PythonRepair response",
+                response_artifacts=artifacts,
+                repair_attempts=attempt,
+            )
+        else:
+            if not isinstance(contract, PythonRepair):
+                raise AssertionError("unexpected Python repair contract")
+            updates = _generated_execution_update(
+                state=repair_state,
+                strategy=strategy,
+                runner=runner,
+                code=contract.code,
+                materially_changed=_materially_changed(
+                    state.get("current_generated_code", ""), contract.code
+                ),
+                repair_attempts=attempt,
+                version=version,
+                response_artifacts=artifacts,
+            )
         return {
             **updates,
             "code_repair_count": state.get("code_repair_count", 0) + 1,

@@ -118,8 +118,11 @@ def test_python_policy_failure_skips_verifier_and_global_replan(tmp_path: Path) 
         "    return pd.read_csv(path)\n"
         "read('inputs/patients.csv')\n"
     )
+    generation = json.dumps(
+        {"kind": "python", "code": blocked_code, "summary": "Read the input."}
+    )
     model = ScriptedRoleModel(
-        {"planner": [plan], "executor": [strategy, blocked_code, blocked_code]}
+        {"planner": [plan], "executor": [strategy, generation]}
     )
 
     result = build_graph(model).invoke(
@@ -201,7 +204,16 @@ def _strategy_test_model(strategy: dict[str, object]) -> ScriptedRoleModel:
     return ScriptedRoleModel(
         {
             "planner": [plan],
-            "executor": [json.dumps(strategy), "print('{\"value\": 2.0}')\n"],
+            "executor": [
+                json.dumps(strategy),
+                json.dumps(
+                    {
+                        "kind": "python",
+                        "code": "__agent_result__ = {'value': 2.0}\n",
+                        "summary": "Return one value.",
+                    }
+                ),
+            ],
             "verifier": ['{"decision":"PASS","feedback":"Value returned."}'],
         }
     )

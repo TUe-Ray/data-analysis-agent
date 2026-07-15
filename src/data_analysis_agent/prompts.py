@@ -33,22 +33,30 @@ concise_reason. Arguments must validate against the selected capability. For
 generated_python, capability_name must be null and arguments must be {}."""
 
 PYTHON_GENERATION_SYSTEM_PROMPT = """Generate one deterministic Python script for
-the supplied fixed scientific goal. Use only the standard library, pandas, numpy,
-or scipy when already installed. Read only the explicitly allowed staged files,
-write only below the assigned goal directory, do not access the network,
-environment variables, subprocesses, shells, or package installers, and do not
-delete files. Prefer direct literal staged paths, for example
-pd.read_csv("inputs/patients.csv"). Dynamically constructed file paths may be
-rejected, including paths built from __file__, os.path, environment values, loops,
-globbing, or function parameters. Print one JSON object as the final non-empty
-stdout line. Return only Python source code without Markdown fences or explanation."""
+the supplied fixed scientific goal. Return only the required PythonGeneration JSON
+object with kind="python", complete source in code, and a concise summary. Use only
+the standard library, pandas, numpy, or scipy when already installed. Read only the
+explicitly allowed staged files and use their exact absolute paths as direct string
+literals. The process current working directory is the assigned goal directory, so
+relative output paths remain inside it. Do not write outside that directory, access
+the network, environment variables, subprocesses, shells, or package installers,
+or delete files. Dynamically constructed file paths may be rejected, including
+paths built from __file__, os.path, environment values, loops, globbing, or
+function parameters. Assign the authoritative result object to the fixed variable
+__agent_result__. Do not manually serialize or print the authoritative result;
+debug stdout is allowed. Never put summary text, JSON framing, Markdown fences, or
+explanation inside code."""
 
 PYTHON_REPAIR_SYSTEM_PROMPT = """Repair one mechanically failing generated Python
 script. Preserve the exact goal, required outputs, constraints, and scientific
-method. Fix implementation only. Use only the stated libraries and files. Return
-only complete Python source code without Markdown fences or explanation. If the
-failure is PythonPolicyError, use the exact allowed staged paths as direct literals
-(for example pd.read_csv("inputs/patients.csv")); do not construct paths dynamically."""
+method. Fix implementation only. Return only the required PythonRepair JSON object
+with kind="python_repair", complete source in code, a concise summary, and the
+addressed_failure_category. Use only the stated libraries and exact absolute staged
+file paths as direct literals. The process current working directory is the assigned
+goal directory, so relative output paths remain inside it. Assign the authoritative
+result object to __agent_result__; do not manually serialize or print that result.
+If the failure is PythonPolicyError, do not construct paths dynamically. Never put
+summary text, JSON framing, Markdown fences, or explanation inside code."""
 
 VERIFIER_SYSTEM_PROMPT = """You are the independent scientific Verifier.
 Judge only the supplied original question, any supplied input context or scientific
@@ -200,11 +208,13 @@ def build_python_generation_messages(
             "content": (
                 f"Current IntermediateGoal:\n{json.dumps(current_goal)}\n\n"
                 f"Allowed input files:\n{json.dumps(staged_file_paths)}\n\n"
-                "Use those paths directly as string literals when reading data; "
-                'for example pd.read_csv("inputs/patients.csv").\n\n'
+                "Use those exact absolute paths directly as string literals when "
+                "reading data.\n\n"
                 "Completed prerequisite results:\n"
                 f"{json.dumps(completed_goal_results)}\n\n"
-                f"Assigned goal directory:\n{goal_directory}"
+                f"Assigned goal directory and process cwd:\n{goal_directory}\n\n"
+                "Assign exactly one JSON-compatible object to __agent_result__. "
+                "The trusted runner serializes it with allow_nan=False."
             ),
         },
     ]
@@ -236,15 +246,16 @@ def build_python_repair_messages(
                 f"Execution error:\n{error or 'none'}\n\n"
                 "Allowed libraries: Python standard library, pandas, numpy, scipy.\n"
                 f"Allowed files:\n{json.dumps(staged_file_paths)}\n\n"
-                f"Allowed output directory:\n{goal_directory}\n\n"
+                f"Allowed output directory and process cwd:\n{goal_directory}\n\n"
                 "Recent compact repair history:\n"
                 f"{json.dumps(repair_history or [], ensure_ascii=False)}\n\n"
                 "Change the implementation that caused this mechanical failure; do "
                 "not change the scientific method, constraints, or required "
                 "outputs.\n\n"
-                "If this is a PythonPolicyError, repair using only the exact paths "
-                "above as direct literals (for example "
-                'pd.read_csv("inputs/patients.csv")). Do not use __file__, '
+                "Assign the JSON-compatible result object to __agent_result__; the "
+                "trusted runner owns serialization and stdout is not authoritative.\n\n"
+                "If this is a PythonPolicyError, repair using only the exact "
+                "absolute paths above as direct literals. Do not use __file__, "
                 "os.path, environment values, globbing, loops, or function "
                 "parameters to construct input paths."
             ),

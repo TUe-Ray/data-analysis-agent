@@ -20,6 +20,8 @@ from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from data_analysis_agent.schemas import ExecutionFailureCategory
+
 ALLOWED_THIRD_PARTY = {"pandas", "numpy", "scipy"}
 BANNED_IMPORTS = {
     "requests",
@@ -73,9 +75,9 @@ READ_METHODS = {"read_csv", "read_table", "read_text", "read_bytes", "loadtxt"}
 PATH_DISCOVERY_CALLS = {"glob", "rglob", "iterdir", "walk", "scandir", "listdir"}
 
 StaticPathValue: TypeAlias = str | dict[str, str]
-ExecutionFailureCategory: TypeAlias = Literal[
-    "policy_error", "syntax_error", "runtime_error", "timeout", "result_contract_error"
-]
+ResultMode: TypeAlias = Literal["agent_variable", "legacy_stdout"]
+RESULT_VARIABLE = "__agent_result__"
+RESULT_CONTRACT_MARKER = "AGENT_RESULT_CONTRACT_ERROR:"
 
 
 class PythonExecutionResult(BaseModel):
@@ -97,6 +99,7 @@ class PythonExecutionResult(BaseModel):
     policy_validated: bool = False
     parsed_result: bool = False
     failure_category: ExecutionFailureCategory | None = None
+    deterministic_result_recovery_attempted: bool = False
 
 
 class PythonPolicyError(ValueError):
@@ -379,7 +382,10 @@ def validate_generated_code(
                 raise PythonPolicyError("Dynamic file paths are prohibited")
 
 
-def _parse_json_result(stdout: str, goal_directory: Path) -> dict[str, JsonValue]:
+def _parse_legacy_stdout_result(
+    stdout: str, goal_directory: Path
+) -> dict[str, JsonValue]:
+    """Compatibility-only parser for the explicitly legacy one-shot approach."""
     result_path = goal_directory / "generated_outputs" / "result.json"
     if result_path.is_file():
         raw = result_path.read_text(encoding="utf-8")
@@ -392,6 +398,60 @@ def _parse_json_result(stdout: str, goal_directory: Path) -> dict[str, JsonValue
     if not isinstance(parsed, dict):
         raise ValueError("Generated result must be one JSON object")
     # Pydantic's JsonValue validation is applied by PythonExecutionResult.
+    return parsed
+
+
+def _trusted_runner_source(*, script_path: Path, result_path: Path) -> str:
+    """Build a runner-owned epilogue; generated source is never interpolated."""
+    return f'''import json
+import runpy
+import sys
+from pathlib import Path
+
+RESULT_MARKER = {RESULT_CONTRACT_MARKER!r}
+
+
+def fail(message):
+    sys.stderr.write(RESULT_MARKER + " " + message + "\\n")
+    raise SystemExit(86)
+
+
+namespace = runpy.run_path({str(script_path)!r}, run_name="__main__")
+if {RESULT_VARIABLE!r} not in namespace:
+    fail("result variable missing: {RESULT_VARIABLE}")
+result = namespace[{RESULT_VARIABLE!r}]
+if not isinstance(result, dict):
+    fail("result is not an object")
+try:
+    serialized = json.dumps(
+        result,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+except TypeError:
+    fail("result is not JSON-serializable")
+except ValueError:
+    fail("result contains NaN or Infinity")
+try:
+    Path({str(result_path)!r}).write_text(serialized, encoding="utf-8")
+except (OSError, UnicodeError):
+    fail("trusted serialization failed")
+'''
+
+
+def _parse_trusted_result(goal_directory: Path) -> dict[str, JsonValue]:
+    """Parse only the file written by the trusted runner epilogue."""
+    result_path = goal_directory / "generated_outputs" / "result.json"
+    if not result_path.is_file():
+        raise ValueError("trusted result file missing")
+    try:
+        parsed = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("trusted serialization failed") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("trusted result is not an object")
     return parsed
 
 
@@ -423,11 +483,32 @@ class LocalPythonRunner:
         allowed_files: list[Path],
         version: int,
         working_directory: Path | None = None,
+        result_mode: ResultMode = "agent_variable",
     ) -> PythonExecutionResult:
         goal_directory.mkdir(parents=True, exist_ok=True)
-        execution_directory = (working_directory or goal_directory).resolve()
+        execution_directory = (
+            (working_directory or goal_directory).resolve()
+            if result_mode == "legacy_stdout"
+            else goal_directory.resolve()
+        )
         script_path = goal_directory / f"generated_code_v{version}.py"
         script_path.write_text(code, encoding="utf-8")
+        generated_outputs = goal_directory / "generated_outputs"
+        result_path = generated_outputs / "result.json"
+        try:
+            result_path.unlink()
+        except FileNotFoundError:
+            pass
+        runner_path: Path | None = None
+        if result_mode == "agent_variable":
+            generated_outputs.mkdir(parents=True, exist_ok=True)
+            runner_path = goal_directory / f"runner_entry_v{version}.py"
+            runner_path.write_text(
+                _trusted_runner_source(
+                    script_path=script_path.resolve(), result_path=result_path.resolve()
+                ),
+                encoding="utf-8",
+            )
         started = time.perf_counter()
         if self.progress_callback:
             self.progress_callback("code execution — starting...")
@@ -440,6 +521,7 @@ class LocalPythonRunner:
         policy_validated = False
         parsed_result_available = False
         failure_category: ExecutionFailureCategory | None = None
+        deterministic_result_recovery_attempted = False
 
         try:
             validate_generated_code(
@@ -449,6 +531,7 @@ class LocalPythonRunner:
                 working_directory=execution_directory,
             )
             policy_validated = True
+            deterministic_result_recovery_attempted = result_mode == "agent_variable"
             environment = {
                 "PATH": os.environ.get("PATH", ""),
                 "PYTHONHASHSEED": "0",
@@ -456,7 +539,7 @@ class LocalPythonRunner:
                 "LANG": "C.UTF-8",
             }
             completed = subprocess.run(
-                [sys.executable, "-I", str(script_path)],
+                [sys.executable, "-I", str(runner_path or script_path)],
                 cwd=execution_directory,
                 env=environment,
                 capture_output=True,
@@ -468,13 +551,29 @@ class LocalPythonRunner:
             stdout = completed.stdout[-self.output_limit :]
             stderr = completed.stderr[-self.output_limit :]
             if exit_code != 0:
-                error_message = f"Generated Python exited with code {exit_code}"
-                failure_category = (
-                    "syntax_error" if "SyntaxError" in stderr else "runtime_error"
+                contract_error = next(
+                    (
+                        line.split(RESULT_CONTRACT_MARKER, 1)[1].strip()
+                        for line in stderr.splitlines()
+                        if line.startswith(RESULT_CONTRACT_MARKER)
+                    ),
+                    None,
                 )
+                if contract_error is not None:
+                    error_message = f"ResultContractError: {contract_error}"
+                    failure_category = "result_contract_error"
+                else:
+                    error_message = f"Generated Python exited with code {exit_code}"
+                    failure_category = (
+                        "syntax_error" if "SyntaxError" in stderr else "runtime_error"
+                    )
             else:
                 try:
-                    parsed_result = _parse_json_result(stdout, goal_directory)
+                    parsed_result = (
+                        _parse_trusted_result(goal_directory)
+                        if result_mode == "agent_variable"
+                        else _parse_legacy_stdout_result(stdout, goal_directory)
+                    )
                     parsed_result_available = True
                 except (
                     OSError,
@@ -482,7 +581,7 @@ class LocalPythonRunner:
                     json.JSONDecodeError,
                     ValueError,
                 ) as error:
-                    error_message = f"Invalid JSON output: {error}"
+                    error_message = f"ResultContractError: {error}"
                     failure_category = "result_contract_error"
         except PythonPolicyError as error:
             error_message = f"PythonPolicyError: {error}"
@@ -506,7 +605,8 @@ class LocalPythonRunner:
         (goal_directory / "stdout.txt").write_text(stdout, encoding="utf-8")
         (goal_directory / "stderr.txt").write_text(stderr, encoding="utf-8")
         artifact_paths = [str(script_path), str(stdout_path), str(stderr_path)]
-        generated_outputs = goal_directory / "generated_outputs"
+        if runner_path is not None:
+            artifact_paths.append(str(runner_path))
         for output_path in sorted(generated_outputs.glob("*")):
             if output_path.is_file():
                 artifact_paths.append(str(output_path))
@@ -530,6 +630,9 @@ class LocalPythonRunner:
             policy_validated=policy_validated,
             parsed_result=parsed_result_available,
             failure_category=failure_category,
+            deterministic_result_recovery_attempted=(
+                deterministic_result_recovery_attempted
+            ),
         )
         execution_path = goal_directory / f"execution_result_v{version}.json"
         execution_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
@@ -553,7 +656,7 @@ def write_execution_metadata(
     metadata = {
         "run_id": run_id,
         "goal_id": goal_id,
-        "script_paths": [item.script_path for item in executions],
+        "script_paths": [item.script_path for item in executions if item.script_path],
         "creation_timestamp": datetime.now(UTC).isoformat(),
         "execution_succeeded": successful is not None,
         "repair_required": len(executions) > 1,

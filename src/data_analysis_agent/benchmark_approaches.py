@@ -308,6 +308,7 @@ def run_one_shot_code(
             allowed_files=_resolved_public_files(public, run_directory),
             version=1,
             working_directory=run_directory,
+            result_mode="legacy_stdout",
         )
         if execution.success:
             candidate = execution.result
@@ -320,7 +321,7 @@ def run_one_shot_code(
                 status = "timed_out"
             elif (execution.error or "").startswith("PythonPolicyError:"):
                 status = "python_policy_failure"
-            elif (execution.error or "").startswith("Invalid JSON output"):
+            elif (execution.error or "").startswith("ResultContractError"):
                 status = "invalid_json"
             else:
                 status = "execution_failed"
@@ -387,7 +388,6 @@ def run_agent(
             "file_paths": [Path(path).name for path in public.data_files],
             "staged_file_paths": [str(path) for path in staged_files],
             "staged_file_display_paths": list(public.data_files),
-            "execution_working_directory": str(run_directory.resolve()),
             "input_context": _agent_input_context(public),
             "run_directory": str(agent_directory),
             "replan_count": 0,
@@ -443,7 +443,24 @@ def run_agent(
                     elif event == "planner_validation:VALID":
                         plan = result.get("high_level_plan", {})
                         goals = plan.get("goals", []) if isinstance(plan, dict) else []
-                        _progress(progress, "plan_available", goals=goals)
+                        completed_goal_ids = [
+                            str(item["goal_id"])
+                            for item in result.get("completed_goal_results", [])
+                        ]
+                        current_index = result.get("current_goal_index", 0)
+                        current_goal_id = (
+                            str(goals[current_index]["goal_id"])
+                            if current_index < len(goals)
+                            else None
+                        )
+                        _progress(
+                            progress,
+                            "plan_available",
+                            goals=goals,
+                            completed_goal_ids=completed_goal_ids,
+                            current_goal_id=current_goal_id,
+                            scientific_replan_count=result.get("replan_count", 0),
+                        )
                     elif event == "planner_validation:INVALID":
                         _progress(
                             progress, "activity", message="Planner — invalid plan"
@@ -498,15 +515,16 @@ def run_agent(
                             )
                     elif event == "verifier:REPLAN":
                         _progress(progress, "activity", message="Verifier — REPLAN")
-                        _progress(
-                            progress,
-                            "activity",
-                            message=(
-                                "Scientific replan: "
-                                f"[{result.get('replan_count', 0) + 1}/"
-                                f"{result.get('max_replans', 1)}]"
-                            ),
-                        )
+                        replan_count = result.get("replan_count", 0)
+                        max_replans = result.get("max_replans", 1)
+                        if replan_count < max_replans:
+                            message = (
+                                f"Scientific replan: "
+                                f"[{replan_count + 1}/{max_replans}]"
+                            )
+                        else:
+                            message = "Scientific replan budget exhausted"
+                        _progress(progress, "activity", message=message)
                 trace_size = len(trace)
         if progress:
             _progress(

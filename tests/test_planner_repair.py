@@ -39,8 +39,12 @@ def _strategy() -> str:
     )
 
 
-GOOD_CODE = "import json\nprint(json.dumps({'value': 2}))\n"
+GOOD_CODE = "__agent_result__ = {'value': 2}\n"
 PASS = '{"decision":"PASS","feedback":"The required value is present."}'
+
+
+def _generation(code: str = GOOD_CODE) -> str:
+    return json.dumps({"kind": "python", "code": code, "summary": "Generate."})
 
 
 def _state(tmp_path: Path, **overrides: object) -> dict[str, object]:
@@ -103,7 +107,7 @@ def test_invalid_planner_output_repairs_before_execution(
     model = ScriptedRoleModel(
         {
             "planner": [invalid_plan, _plan("G1")],
-            "executor": [_strategy(), GOOD_CODE],
+            "executor": [_strategy(), _generation()],
             "verifier": [PASS],
         }
     )
@@ -146,7 +150,7 @@ def test_scientific_replan_invalid_replacement_increments_once(tmp_path: Path) -
     model = ScriptedRoleModel(
         {
             "planner": [_plan("G1"), invalid_replacement, _plan("G1")],
-            "executor": [_strategy(), GOOD_CODE, _strategy(), GOOD_CODE],
+            "executor": [_strategy(), _generation(), _strategy(), _generation()],
             "verifier": [
                 '{"decision":"REPLAN","feedback":"Scientific correction required."}',
                 PASS,
@@ -167,7 +171,7 @@ def test_valid_planner_response_keeps_original_single_call_path(tmp_path: Path) 
     model = ScriptedRoleModel(
         {
             "planner": [_plan("G1")],
-            "executor": [_strategy(), GOOD_CODE],
+            "executor": [_strategy(), _generation()],
             "verifier": [PASS],
         }
     )

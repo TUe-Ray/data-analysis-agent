@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -7,7 +9,7 @@ from data_analysis_agent.python_runner import LocalPythonRunner, validate_genera
 
 def test_runner_captures_success_and_saves_artifacts(tmp_path: Path) -> None:
     result = LocalPythonRunner(timeout_seconds=2).run(
-        code='import json\nprint(json.dumps({"result": 2.0}))\n',
+        code='print("debug")\n__agent_result__ = {"result": 2.0}\n',
         goal_directory=tmp_path / "goal",
         allowed_files=[],
         version=1,
@@ -20,7 +22,9 @@ def test_runner_captures_success_and_saves_artifacts(tmp_path: Path) -> None:
     assert Path(result.script_path).is_file()
     assert (tmp_path / "goal/execution_result.json").is_file()
     assert (tmp_path / "goal/stdout.txt").read_text(encoding="utf-8")
-    assert not (tmp_path / "goal/generated_outputs").exists()
+    assert (tmp_path / "goal/generated_outputs/result.json").read_text(
+        encoding="utf-8"
+    ) == '{"result":2.0}'
 
 
 def test_runner_handles_timeout(tmp_path: Path) -> None:
@@ -75,7 +79,7 @@ def test_runner_preserves_failed_and_repaired_versions(tmp_path: Path) -> None:
         version=1,
     )
     second = runner.run(
-        code="print('{}')\n",
+        code="__agent_result__ = {}\n",
         goal_directory=goal,
         allowed_files=[],
         version=2,
@@ -115,13 +119,14 @@ def test_runner_preserves_nonempty_generated_outputs(tmp_path: Path) -> None:
         goal_directory=goal,
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert result.success
     assert (goal / "generated_outputs/result.json").is_file()
 
 
-def test_runner_accepts_exact_staged_relative_pandas_path(tmp_path: Path) -> None:
+def test_runner_accepts_exact_staged_absolute_pandas_path(tmp_path: Path) -> None:
     attempt = tmp_path / "attempt"
     staged = attempt / "inputs/patients.csv"
     staged.parent.mkdir(parents=True)
@@ -129,13 +134,11 @@ def test_runner_accepts_exact_staged_relative_pandas_path(tmp_path: Path) -> Non
 
     result = LocalPythonRunner().run(
         code=(
-            "import json\n"
             "import pandas as pd\n"
-            "frame = pd.read_csv('inputs/patients.csv')\n"
-            "print(json.dumps({'rows': len(frame)}))\n"
+            f"frame = pd.read_csv({str(staged.resolve())!r})\n"
+            "__agent_result__ = {'rows': len(frame)}\n"
         ),
         goal_directory=attempt / "execution",
-        working_directory=attempt,
         allowed_files=[staged.resolve()],
         version=1,
     )
@@ -145,37 +148,42 @@ def test_runner_accepts_exact_staged_relative_pandas_path(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "path_expression",
+    "path_expression_kind",
     [
-        "'inputs/patients.csv'",
-        "PATIENTS_PATH",
-        "Path('inputs') / 'patients.csv'",
-        "INPUTS / 'patients.csv'",
-        "PATHS['patients']",
+        "literal",
+        "name",
+        "path_literal",
+        "path_join",
+        "mapping",
     ],
 )
 def test_runner_accepts_statically_resolvable_staged_paths(
-    tmp_path: Path, path_expression: str
+    tmp_path: Path, path_expression_kind: str
 ) -> None:
     attempt = tmp_path / "attempt"
     staged = attempt / "inputs/patients.csv"
     staged.parent.mkdir(parents=True)
     staged.write_text("patient_id\nP001\n", encoding="utf-8")
+    path_expression = {
+        "literal": repr(str(staged.resolve())),
+        "name": "PATIENTS_PATH",
+        "path_literal": f"Path({str(staged.resolve())!r})",
+        "path_join": "INPUTS / 'patients.csv'",
+        "mapping": "PATHS['patients']",
+    }[path_expression_kind]
     code = (
-        "import json\n"
         "import pandas as pd\n"
         "from pathlib import Path\n"
-        "PATIENTS_PATH = 'inputs/patients.csv'\n"
-        "INPUTS = Path('inputs')\n"
-        "PATHS = {'patients': 'inputs/patients.csv'}\n"
+        f"PATIENTS_PATH = {str(staged.resolve())!r}\n"
+        f"INPUTS = Path({str(staged.parent.resolve())!r})\n"
+        f"PATHS = {{'patients': {str(staged.resolve())!r}}}\n"
         f"frame = pd.read_csv({path_expression})\n"
-        "print(json.dumps({'rows': len(frame)}))\n"
+        "__agent_result__ = {'rows': len(frame)}\n"
     )
 
     result = LocalPythonRunner().run(
         code=code,
         goal_directory=attempt / "execution",
-        working_directory=attempt,
         allowed_files=[staged.resolve()],
         version=1,
     )
@@ -336,3 +344,99 @@ def test_previous_dynamic_generated_path_patterns_remain_blocked(
 
     assert not result.success
     assert "Dynamic file paths" in (result.error or "")
+
+
+def test_debug_and_multiline_stdout_are_not_authoritative(tmp_path: Path) -> None:
+    code = (
+        "import json\n"
+        "print('debug before')\n"
+        "print(json.dumps({'wrong': True}, indent=2))\n"
+        "__agent_result__ = {'right': 7}\n"
+        "print('debug after')\n"
+    )
+
+    result = LocalPythonRunner().run(
+        code=code,
+        goal_directory=tmp_path / "goal",
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    assert result.result == {"right": 7}
+    assert "debug before" in result.stdout
+    assert "debug after" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("value = 1\n", "result variable missing"),
+        ("__agent_result__ = [1, 2]\n", "result is not an object"),
+        ("__agent_result__ = {'bad': {1, 2}}\n", "not JSON-serializable"),
+        ("__agent_result__ = {'bad': float('nan')}\n", "NaN or Infinity"),
+        ("__agent_result__ = {'bad': float('inf')}\n", "NaN or Infinity"),
+    ],
+)
+def test_agent_result_contract_failures_are_typed(
+    tmp_path: Path, code: str, message: str
+) -> None:
+    result = LocalPythonRunner().run(
+        code=code,
+        goal_directory=tmp_path / "goal",
+        allowed_files=[],
+        version=1,
+    )
+
+    assert not result.success
+    assert result.failure_category == "result_contract_error"
+    assert message in (result.error or "")
+
+
+def test_trusted_result_file_missing_is_clear(tmp_path: Path) -> None:
+    with patch(
+        "data_analysis_agent.python_runner._trusted_runner_source",
+        return_value="pass\n",
+    ):
+        result = LocalPythonRunner().run(
+            code="__agent_result__ = {'value': 1}\n",
+            goal_directory=tmp_path / "goal",
+            allowed_files=[],
+            version=1,
+        )
+
+    assert not result.success
+    assert result.failure_category == "result_contract_error"
+    assert "trusted result file missing" in (result.error or "")
+
+
+def test_relative_outputs_are_created_inside_goal_directory(tmp_path: Path) -> None:
+    goal = tmp_path / "goal"
+    result = LocalPythonRunner().run(
+        code=(
+            "open('patients_normalized.csv', 'w', encoding='utf-8').write('ok')\n"
+            "__agent_result__ = {'saved': True}\n"
+        ),
+        goal_directory=goal,
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    assert (goal / "patients_normalized.csv").read_text(encoding="utf-8") == "ok"
+    assert not (tmp_path / "patients_normalized.csv").exists()
+
+
+def test_trusted_result_serialization_is_deterministic(tmp_path: Path) -> None:
+    goal = tmp_path / "goal"
+    result = LocalPythonRunner().run(
+        code="__agent_result__ = {'z': 1, 'a': [2, 3]}\n",
+        goal_directory=goal,
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    raw = (goal / "generated_outputs/result.json").read_text(encoding="utf-8")
+    assert raw == '{"a":[2,3],"z":1}'
+    assert json.loads(raw) == result.result

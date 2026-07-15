@@ -74,22 +74,25 @@ def _three_file_public_task() -> PublicTaskView:
     )
 
 
-def _read_all_files_code() -> str:
-    return """import csv
-import json
+def _read_all_files_code(attempt: Path, *, legacy_stdout: bool = False) -> str:
+    patients_path = (attempt / "inputs/patients.csv").resolve()
+    visits_path = (attempt / "inputs/visits.csv").resolve()
+    exclusions_path = (attempt / "inputs/exclusions.csv").resolve()
+    result_statement = (
+        'print("{\\"status\\":\\"completed\\",\\"answer\\":\\"read\\",'
+        '\\"key_results\\":{\\"files_read\\":3},\\"limitations\\":[]}")'
+        if legacy_stdout
+        else "__agent_result__ = {'files_read': 3}"
+    )
+    return f"""import csv
 
-with open("inputs/patients.csv", encoding="utf-8") as handle:
+with open({str(patients_path)!r}, encoding="utf-8") as handle:
     patients = list(csv.DictReader(handle))
-with open("inputs/visits.csv", encoding="utf-8") as handle:
+with open({str(visits_path)!r}, encoding="utf-8") as handle:
     visits = list(csv.DictReader(handle))
-with open("inputs/exclusions.csv", encoding="utf-8") as handle:
+with open({str(exclusions_path)!r}, encoding="utf-8") as handle:
     exclusions = list(csv.DictReader(handle))
-print(json.dumps({
-    "status": "completed",
-    "answer": "read all public inputs",
-    "key_results": {"files_read": 3},
-    "limitations": []
-}))
+{result_statement}
 """
 
 
@@ -238,7 +241,9 @@ def test_one_shot_prompt_paths_are_usable_for_every_public_input(
 ) -> None:
     attempt = tmp_path / "attempt"
     public = stage_public_task(_three_file_public_task(), attempt)
-    model = ScriptedRoleModel({"one_shot_code": [_read_all_files_code()]})
+    model = ScriptedRoleModel(
+        {"one_shot_code": [_read_all_files_code(attempt, legacy_stdout=True)]}
+    )
 
     outcome = run_one_shot_code(
         public=public,
@@ -316,13 +321,21 @@ def _wrong_agent_factory(approach, public):
             "concise_reason": "Generate code.",
         }
     )
-    code = (
-        f"open({path!r}).read()\n"
-        "print('{\"mean_absolute_successive_difference\": 3.0}')\n"
+    code = "__agent_result__ = {'mean_absolute_successive_difference': 3.0}\n"
+    generation = json.dumps(
+        {
+            "kind": "python",
+            "code": code,
+            "summary": f"Compute from {path}.",
+        }
     )
     verifier = '{"decision":"PASS","feedback":"Looks complete."}'
     return ScriptedRoleModel(
-        {"planner": [plan], "executor": [strategy, code], "verifier": [verifier]}
+        {
+            "planner": [plan],
+            "executor": [strategy, generation],
+            "verifier": [verifier],
+        }
     )
 
 
@@ -408,7 +421,16 @@ def test_agent_generated_python_receives_usable_relative_public_paths(
     model = ScriptedRoleModel(
         {
             "planner": [plan],
-            "executor": [strategy, _read_all_files_code()],
+            "executor": [
+                strategy,
+                json.dumps(
+                    {
+                        "kind": "python",
+                        "code": _read_all_files_code(attempt),
+                        "summary": "Read all staged files.",
+                    }
+                ),
+            ],
             "verifier": [verifier],
         }
     )
@@ -423,8 +445,7 @@ def test_agent_generated_python_receives_usable_relative_public_paths(
     code_call = [call for call in model.calls if call.role == "executor"][1]
     assert outcome.status == "completed"
     for path in public.data_files:
-        assert path in code_call.messages[1]["content"]
-        assert str((attempt / path).resolve()) not in code_call.messages[1]["content"]
+        assert str((attempt / path).resolve()) in code_call.messages[1]["content"]
     workflow_log = (attempt / "agent_run/workflow.log").read_text(encoding="utf-8")
     assert "Normalized generated_python capability_name" in workflow_log
 

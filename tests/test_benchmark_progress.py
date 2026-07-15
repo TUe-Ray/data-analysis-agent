@@ -1,5 +1,6 @@
 """Terminal and redirected-output behavior for benchmark progress rendering."""
 
+import json
 from io import StringIO
 from pathlib import Path
 
@@ -8,8 +9,11 @@ from data_analysis_agent.benchmark import (
     _offline_model_factory,
     run_benchmark,
 )
+from data_analysis_agent.benchmark_approaches import run_agent
 from data_analysis_agent.benchmark_progress import BenchmarkProgressRenderer
+from data_analysis_agent.benchmark_tasks import load_benchmark_task, stage_public_task
 from data_analysis_agent.benchmark_types import BenchmarkConfig
+from data_analysis_agent.models import ScriptedRoleModel
 
 
 def _renderer(*, interactive: bool, artifact_path: Path | None = None):
@@ -143,3 +147,124 @@ def test_agent_progress_stream_uses_approved_plan_without_ansi(tmp_path: Path) -
     assert "✓ compute_successive_difference" in output
     assert "Progress: [1/1]" in output
     assert "\x1b" not in output
+
+
+def test_new_plan_replaces_stale_goals_completion_and_current_state() -> None:
+    renderer, _ = _renderer(interactive=False)
+    renderer.emit(
+        {
+            "type": "plan_available",
+            "goals": [
+                {"goal_id": "G1", "objective": "Old completed goal"},
+                {"goal_id": "G2", "objective": "Old current goal"},
+            ],
+            "completed_goal_ids": ["G1"],
+            "current_goal_id": "G2",
+            "scientific_replan_count": 0,
+        }
+    )
+    renderer.emit(
+        {
+            "type": "plan_available",
+            "goals": [
+                {"goal_id": "G2", "objective": "Revised current goal"},
+                {"goal_id": "G3", "objective": "New goal"},
+            ],
+            "completed_goal_ids": [],
+            "current_goal_id": "G2",
+            "scientific_replan_count": 1,
+        }
+    )
+
+    assert [goal["goal_id"] for goal in renderer.goals] == ["G2", "G3"]
+    assert renderer.completed == set()
+    assert renderer.current_goal == "G2"
+    assert renderer.scientific_replan_count == 1
+    lines = renderer._progress_lines()
+    assert all("G1" not in line for line in lines)
+    assert sum(line.startswith("✓") for line in lines) == 0
+    assert lines[-1] == "Progress: [0/2]"
+
+
+def test_new_plan_keeps_only_authoritative_preserved_completion() -> None:
+    renderer, _ = _renderer(interactive=False)
+    renderer.completed = {"stale"}
+    renderer.emit(
+        {
+            "type": "plan_available",
+            "goals": [
+                {"goal_id": "G1", "objective": "Preserved"},
+                {"goal_id": "G3", "objective": "Current"},
+            ],
+            "completed_goal_ids": ["G1"],
+            "current_goal_id": "G3",
+            "scientific_replan_count": 1,
+        }
+    )
+
+    lines = renderer._progress_lines()
+    assert renderer.completed == {"G1"}
+    assert sum(line.startswith("✓") for line in lines) == 1
+    assert lines[-1] == "Progress: [1/2]"
+
+
+def test_exhausted_replan_budget_never_renders_two_of_one(tmp_path: Path) -> None:
+    task = load_benchmark_task(DEFAULT_TASKS_ROOT, "successive_difference_smoke")
+    attempt = tmp_path / "attempt"
+    public = stage_public_task(task.public, attempt)
+    plan = json.dumps(
+        {
+            "scientific_objective": "Return a value.",
+            "goals": [
+                {
+                    "goal_id": "G1",
+                    "objective": "Return a value.",
+                    "required_outputs": ["value"],
+                    "constraints": [],
+                    "success_criteria": ["A value is returned."],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    strategy = json.dumps(
+        {
+            "strategy": "generated_python",
+            "capability_name": None,
+            "arguments": {},
+            "concise_reason": "Use generated Python.",
+        }
+    )
+    generation = json.dumps(
+        {
+            "kind": "python",
+            "code": "__agent_result__ = {'value': 1}\n",
+            "summary": "Return the value.",
+        }
+    )
+    replan = '{"decision":"REPLAN","feedback":"Revise the method."}'
+    model = ScriptedRoleModel(
+        {
+            "planner": [plan, plan],
+            "executor": [strategy, generation, strategy, generation],
+            "verifier": [replan, replan],
+        }
+    )
+    renderer, stream = _renderer(interactive=False)
+
+    run_agent(
+        public=public,
+        model=model,
+        run_directory=attempt,
+        config=BenchmarkConfig(
+            model="offline",
+            task_ids=["successive_difference_smoke"],
+            approaches=["agent"],
+        ),
+        progress=renderer.emit,
+    )
+
+    output = stream.getvalue()
+    assert "Scientific replan: [1/1]" in output
+    assert "Scientific replan budget exhausted" in output
+    assert "[2/1]" not in output

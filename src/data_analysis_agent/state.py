@@ -35,12 +35,16 @@ class CodeExecutionRecord(TypedDict, total=False):
     version: int
     attempt: int
     failure_category: str | None
+    normalized_failure_family: str | None
+    consecutive_failure_family_count: int
     exit_code: int | None
     timed_out: bool
     policy_validated: bool
     parsed_result: bool
     error: str | None
     source_changed: bool
+    materially_changed: bool
+    deterministic_result_recovery_attempted: bool
     route: str
     code_repair_attempts_for_current_goal: int
     scientific_replan_count: int
@@ -91,8 +95,10 @@ class AgentState(TypedDict, total=False):
     code_repair_no_progress_count: int
     max_code_repair_no_progress_attempts: int
     code_repair_no_progress: bool
+    consecutive_failure_family: str | None
     current_generated_code: str
     generated_execution_history: list[dict[str, JsonValue]]
+    python_response_history: list[dict[str, JsonValue]]
     code_execution_history: list[CodeExecutionRecord]
     execution_failure_category: str | None
     failure_category: (
@@ -102,6 +108,7 @@ class AgentState(TypedDict, total=False):
             "runtime_error",
             "timeout",
             "result_contract_error",
+            "generation_contract_error",
             "scientific_verification_failure",
         ]
         | None

@@ -1,8 +1,61 @@
 """Structured workflow, execution, verifier, and final-answer outputs."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    field_validator,
+)
+
+ExecutionFailureCategory: TypeAlias = Literal[
+    "policy_error",
+    "syntax_error",
+    "runtime_error",
+    "timeout",
+    "result_contract_error",
+    "generation_contract_error",
+]
+
+
+class PythonGeneration(BaseModel):
+    """Strict structured response used to create one generated script."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["python"]
+    code: str = Field(min_length=1)
+    summary: str
+
+    @field_validator("code")
+    @classmethod
+    def code_must_not_be_blank(cls, value: str) -> str:
+        """Reject whitespace-only source even though it satisfies min_length."""
+        if not value.strip():
+            raise ValueError("code must contain non-whitespace Python source")
+        return value
+
+
+class PythonRepair(BaseModel):
+    """Strict structured response for a mechanical Python repair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["python_repair"]
+    code: str = Field(min_length=1)
+    summary: str
+    addressed_failure_category: ExecutionFailureCategory
+
+    @field_validator("code")
+    @classmethod
+    def code_must_not_be_blank(cls, value: str) -> str:
+        """Reject whitespace-only repaired source."""
+        if not value.strip():
+            raise ValueError("code must contain non-whitespace Python source")
+        return value
 
 
 class IntermediateGoal(BaseModel):

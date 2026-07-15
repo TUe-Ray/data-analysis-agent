@@ -105,15 +105,23 @@ def _offline_model_factory(approach: Approach, public: PublicTaskView) -> RoleMo
             "limitations": [],
         }
     )
+    data_content = public.data_contents[data_path]
     code_result_only = f"""import csv
-import json
+import io
 
-with open({data_path!r}, encoding="utf-8") as handle:
+with io.StringIO({data_content!r}) as handle:
     values = [float(row["value"]) for row in csv.DictReader(handle) if row["value"]]
 differences = [abs(right - left) for left, right in zip(values, values[1:])]
 value = sum(differences) / len(differences)
-print(json.dumps({{"mean_absolute_successive_difference": value}}))
+__agent_result__ = {{"mean_absolute_successive_difference": value}}
 """
+    structured_code = json.dumps(
+        {
+            "kind": "python",
+            "code": code_result_only,
+            "summary": "Compute the successive-difference statistic.",
+        }
+    )
     one_shot_code = f"""import csv
 import json
 
@@ -167,7 +175,7 @@ print(json.dumps({{
         "direct_answer": [final] if approach == "direct_answer" else [],
         "one_shot_code": [one_shot_code] if approach == "one_shot_code" else [],
         "planner": [plan] if approach == "agent" else [],
-        "executor": [strategy, code_result_only] if approach == "agent" else [],
+        "executor": [strategy, structured_code] if approach == "agent" else [],
         "verifier": [verifier] if approach == "agent" else [],
     }
     return ScriptedRoleModel(responses)  # type: ignore[arg-type]
