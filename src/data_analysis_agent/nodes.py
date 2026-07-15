@@ -1085,7 +1085,12 @@ def make_executor_node(
             staged_file_paths=[str(path) for path in _allowed_paths(state)],
             approved_artifacts=_approved_artifact_context(state),
         )
-        raw_strategy = model.generate(role="executor", messages=messages)
+        raw_strategy = model.generate_structured(
+            role="executor",
+            messages=messages,
+            schema_name="executor_strategy",
+            schema=ExecutionStrategy.model_json_schema(),
+        )
         try:
             strategy = ExecutionStrategy.model_validate_json(raw_strategy)
         except ValidationError as error:

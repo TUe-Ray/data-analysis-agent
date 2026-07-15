@@ -404,5 +404,6 @@ def test_default_no_progress_limit_prevents_eighteen_same_family_repairs(
     structured_calls = [
         call for call in model.calls if call.structured_schema_name is not None
     ]
-    assert len(structured_calls) == 3
+    # executor strategy + initial Python generation + two Python repairs
+    assert len(structured_calls) == 4
     assert result["replan_count"] == 0

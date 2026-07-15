@@ -82,9 +82,7 @@ def test_valid_generation_executes_only_code_and_preserves_summary(
         {
             "planner": [_plan()],
             "executor": [_strategy(), _generation(code, summary)],
-            "verifier": [
-                '{"decision":"PASS","feedback":"The value is present."}'
-            ],
+            "verifier": ['{"decision":"PASS","feedback":"The value is present."}'],
         }
     )
 
@@ -98,6 +96,7 @@ def test_valid_generation_executes_only_code_and_preserves_summary(
     )
     assert metadata["summary"] == summary
     assert summary not in (goal / "generated_code_v1.py").read_text(encoding="utf-8")
+    assert model.calls[1].structured_schema_name == "executor_strategy"
     assert model.calls[2].structured_schema_name == "python_generation"
 
 
@@ -151,9 +150,7 @@ def test_python_repair_uses_its_own_contract_and_metadata(tmp_path: Path) -> Non
     assert result["status"] == "completed"
     assert result["code_repair_count"] == 1
     assert (goal / "generated_code_v2.py").read_text(encoding="utf-8") == repaired_code
-    metadata = json.loads(
-        (goal / "python_repair_v2.json").read_text(encoding="utf-8")
-    )
+    metadata = json.loads((goal / "python_repair_v2.json").read_text(encoding="utf-8"))
     assert metadata["summary"] == summary
     assert summary not in (goal / "generated_code_v2.py").read_text(encoding="utf-8")
     assert model.calls[3].structured_schema_name == "python_repair"
@@ -174,9 +171,7 @@ def test_invalid_repair_response_never_becomes_a_second_script(tmp_path: Path) -
         }
     )
 
-    result = build_graph(model).invoke(
-        _state(tmp_path, max_code_repair_attempts=1)
-    )
+    result = build_graph(model).invoke(_state(tmp_path, max_code_repair_attempts=1))
 
     goal = tmp_path / "run/goals/G1"
     assert result["status"] == "mechanical_execution_failed"
