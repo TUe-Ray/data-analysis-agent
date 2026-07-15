@@ -33,6 +33,7 @@ def test_runner_handles_timeout(tmp_path: Path) -> None:
         goal_directory=tmp_path / "goal",
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -46,6 +47,7 @@ def test_runner_rejects_prohibited_network_import(tmp_path: Path) -> None:
         goal_directory=tmp_path / "goal",
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -62,6 +64,7 @@ def test_runner_rejects_literal_write_outside_run_directory(tmp_path: Path) -> N
         goal_directory=tmp_path / "goal",
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -77,6 +80,7 @@ def test_runner_preserves_failed_and_repaired_versions(tmp_path: Path) -> None:
         goal_directory=goal,
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
     second = runner.run(
         code="__agent_result__ = {}\n",
@@ -99,6 +103,7 @@ def test_runner_rejects_dynamic_read_paths(tmp_path: Path) -> None:
         goal_directory=tmp_path / "goal",
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -228,6 +233,7 @@ def test_runner_rejects_dynamic_or_discovered_read_paths(
         working_directory=attempt,
         allowed_files=[staged.resolve()],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -250,6 +256,7 @@ def test_runner_rejects_unstaged_basename_when_only_inputs_path_is_staged(
         working_directory=attempt,
         allowed_files=[staged.resolve()],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -272,6 +279,7 @@ def test_runner_rejects_private_task_files(tmp_path: Path, private_name: str) ->
         working_directory=attempt,
         allowed_files=[staged.resolve()],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -299,6 +307,7 @@ def test_policy_still_rejects_filesystem_replace(tmp_path: Path, code: str) -> N
         goal_directory=tmp_path / "execution",
         allowed_files=[],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -340,6 +349,7 @@ def test_previous_dynamic_generated_path_patterns_remain_blocked(
         working_directory=attempt,
         allowed_files=[staged.resolve()],
         version=1,
+        result_mode="legacy_stdout",
     )
 
     assert not result.success
@@ -371,7 +381,7 @@ def test_debug_and_multiline_stdout_are_not_authoritative(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     ("code", "message"),
     [
-        ("value = 1\n", "result variable missing"),
+        ("value = 1\n", "missing executable module-level assignment"),
         ("__agent_result__ = [1, 2]\n", "result is not an object"),
         ("__agent_result__ = {'bad': {1, 2}}\n", "not JSON-serializable"),
         ("__agent_result__ = {'bad': float('nan')}\n", "NaN or Infinity"),
@@ -389,7 +399,12 @@ def test_agent_result_contract_failures_are_typed(
     )
 
     assert not result.success
-    assert result.failure_category == "result_contract_error"
+    expected_category = (
+        "generation_contract_error"
+        if "missing executable module-level assignment" in message
+        else "result_contract_error"
+    )
+    assert result.failure_category == expected_category
     assert message in (result.error or "")
 
 

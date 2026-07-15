@@ -79,6 +79,9 @@ class AgentState(TypedDict, total=False):
     current_strategy: dict[str, JsonValue]
     current_goal_result: dict[str, JsonValue]
     completed_goal_results: list[dict[str, JsonValue]]
+    pending_goal_artifacts: list[dict[str, JsonValue]]
+    approved_goal_artifacts: list[dict[str, JsonValue]]
+    approved_goal_artifacts_path: str
     capability_catalog: list[dict[str, JsonValue]]
     staged_file_paths: list[str]
     staged_file_display_paths: list[str]
@@ -118,6 +121,8 @@ class AgentState(TypedDict, total=False):
     verification_feedback: str
     replan_count: int
     max_replans: int
+    stop_after_goals: int | None
+    partial_run_reached: bool
     planner_mode: Literal["initial", "scientific_replan"]
     planner_repair_count: int
     max_planner_repairs: int

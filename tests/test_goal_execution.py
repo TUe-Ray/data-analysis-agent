@@ -117,6 +117,7 @@ def test_python_policy_failure_skips_verifier_and_global_replan(tmp_path: Path) 
         "def read(path):\n"
         "    return pd.read_csv(path)\n"
         "read('inputs/patients.csv')\n"
+        "__agent_result__ = {'rows': 0}\n"
     )
     generation = json.dumps(
         {"kind": "python", "code": blocked_code, "summary": "Read the input."}

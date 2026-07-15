@@ -14,7 +14,12 @@ necessary dependencies. Do not calculate results or prescribe tool names, Python
 functions, imports, file paths, retries, low-level implementation steps, or
 algorithm parameters unless the user explicitly requires a parameter. On replan,
 revise high-level goals using the factual failure and verifier feedback. Do not
-explain hidden reasoning."""
+explain hidden reasoning. Required outputs must be externally verifiable
+JSON-compatible facts (for example counts, finite statistics, or concise status
+facts) or explicitly declared analysis artifacts. Never require an in-memory
+DataFrame, Series, array, or other Python object to appear in a goal result; a
+tabular intermediate belongs in a declared artifact after its producing goal is
+verified."""
 
 PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid scientific
 HighLevelPlan response. Return exactly one JSON object matching the required
@@ -22,7 +27,9 @@ HighLevelPlan schema. Preserve the original scientific task, required coverage,
 and valid goals whenever possible. Use unique goal_id values. Each dependency
 must name an existing goal_id that appears earlier in the goals list. Do not
 calculate results or add implementation details, code, tools, or file paths. Do
-not remove required task outputs merely to make the structure valid."""
+not remove required task outputs merely to make the structure valid. Express
+required outputs as JSON-compatible facts or declared analysis artifacts, never as
+in-memory DataFrames, Series, arrays, or other Python objects."""
 
 EXECUTOR_SYSTEM_PROMPT = """You are the tactical Executor for one scientific goal.
 Choose a trusted built-in capability when it directly satisfies the goal; otherwise
@@ -34,29 +41,59 @@ generated_python, capability_name must be null and arguments must be {}."""
 
 PYTHON_GENERATION_SYSTEM_PROMPT = """Generate one deterministic Python script for
 the supplied fixed scientific goal. Return only the required PythonGeneration JSON
-object with kind="python", complete source in code, and a concise summary. Use only
-the standard library, pandas, numpy, or scipy when already installed. Read only the
-explicitly allowed staged files and use their exact absolute paths as direct string
-literals. The process current working directory is the assigned goal directory, so
-relative output paths remain inside it. Do not write outside that directory, access
-the network, environment variables, subprocesses, shells, or package installers,
-or delete files. Dynamically constructed file paths may be rejected, including
-paths built from __file__, os.path, environment values, loops, globbing, or
-function parameters. Assign the authoritative result object to the fixed variable
-__agent_result__. Do not manually serialize or print the authoritative result;
-debug stdout is allowed. Never put summary text, JSON framing, Markdown fences, or
-explanation inside code."""
+object with kind="python", code_lines, and a concise summary. Each code_lines item
+is exactly one physical Python source line: it must not contain a newline or
+carriage return. Do not include Python comments in code_lines. Use only the standard
+library, pandas, numpy, or scipy when already installed. Read only the explicitly
+allowed staged files and use their exact absolute paths as direct string literals.
+The process current working directory is the assigned goal directory, so relative
+output paths remain inside it. Do not write outside that directory, access the
+network, environment variables, subprocesses, shells, or package installers, or
+delete files. Dynamically constructed file paths may be rejected, including paths
+built from __file__, os.path, environment values, loops, globbing, or function
+parameters. Assign the authoritative result object to the fixed variable
+__agent_result__ at module scope. Do not return it only from a function or print it
+as the authoritative channel. Do not manually serialize it. It must be one
+JSON-compatible object containing only standard JSON-compatible Python values; do
+not place DataFrames, Series, arrays, NumPy scalars, timestamps, Paths, sets, or
+custom objects in it. Write tabular intermediates as declared artifacts instead.
+To request downstream handoff, include an "artifacts" list in __agent_result__; each
+item must contain relative_name, description, and optional media_type, and must name
+an eligible file written inside the current goal directory. Such files are available
+only after the independent Verifier returns PASS.
+Never put summary text, JSON framing, Markdown fences, or explanation inside
+code_lines."""
 
 PYTHON_REPAIR_SYSTEM_PROMPT = """Repair one mechanically failing generated Python
 script. Preserve the exact goal, required outputs, constraints, and scientific
 method. Fix implementation only. Return only the required PythonRepair JSON object
-with kind="python_repair", complete source in code, a concise summary, and the
-addressed_failure_category. Use only the stated libraries and exact absolute staged
-file paths as direct literals. The process current working directory is the assigned
-goal directory, so relative output paths remain inside it. Assign the authoritative
-result object to __agent_result__; do not manually serialize or print that result.
-If the failure is PythonPolicyError, do not construct paths dynamically. Never put
-summary text, JSON framing, Markdown fences, or explanation inside code."""
+with kind="python_repair", code_lines, a concise summary, and the
+addressed_failure_category. Each code_lines item is exactly one physical source line
+without newline or carriage-return characters. Do not include Python comments in
+code_lines. Use only the stated libraries and exact absolute staged-file paths as
+direct literals. The process current working directory is the assigned goal
+directory, so relative output paths remain inside it. Assign a JSON-compatible
+object to __agent_result__ at module scope; do not manually serialize or print that
+result. Do not place DataFrames, Series, arrays, NumPy scalars, timestamps, Paths,
+sets, or custom objects in it. If the failure is PythonPolicyError, do not construct
+paths dynamically. Repair the typed deterministic diagnosis supplied by the user,
+not merely the script in general. Never put summary text, JSON framing, Markdown
+fences, or explanation inside code_lines."""
+
+PYTHON_RESULT_SKELETON = """Minimal accepted pattern (replace paths and fields as
+needed):
+import pandas as pd
+
+patients_df = pd.read_csv("/exact/staged/patients.csv")
+visits_df = pd.read_csv("/exact/staged/visits.csv")
+exclusions_df = pd.read_csv("/exact/staged/exclusions.csv")
+
+__agent_result__ = {
+    "patient_rows": int(len(patients_df)),
+    "visit_rows": int(len(visits_df)),
+    "exclusion_rows": int(len(exclusions_df)),
+}
+"""
 
 VERIFIER_SYSTEM_PROMPT = """You are the independent scientific Verifier.
 Judge only the supplied original question, any supplied input context or scientific
@@ -166,6 +203,7 @@ def build_executor_messages(
     verification_feedback: str | None = None,
     capability_catalog: list[dict[str, JsonValue]] | None = None,
     staged_file_paths: list[str] | None = None,
+    approved_artifacts: list[dict[str, str | None]] | None = None,
 ) -> list[dict[str, str]]:
     """Build a one-goal tactical context; ``plan`` retains V0 compatibility."""
     if current_goal is None:
@@ -182,6 +220,9 @@ def build_executor_messages(
             f"Current IntermediateGoal:\n{json.dumps(current_goal)}",
             "Completed prerequisite GoalResults:\n"
             + json.dumps(completed_goal_results or []),
+            "Verifier-approved prerequisite artifacts (producer, exact path, "
+            "description, media type):\n"
+            + json.dumps(approved_artifacts or []),
             "Available capability catalog:\n" + json.dumps(capability_catalog or []),
         ]
         if verification_feedback:
@@ -199,6 +240,7 @@ def build_python_generation_messages(
     staged_file_paths: list[str],
     completed_goal_results: list[dict[str, JsonValue]],
     goal_directory: str,
+    approved_artifacts: list[dict[str, str | None]] | None = None,
 ) -> list[dict[str, str]]:
     """Supply generated-code creation only the current factual execution context."""
     return [
@@ -212,9 +254,12 @@ def build_python_generation_messages(
                 "reading data.\n\n"
                 "Completed prerequisite results:\n"
                 f"{json.dumps(completed_goal_results)}\n\n"
+                "Verifier-approved prerequisite artifacts:\n"
+                f"{json.dumps(approved_artifacts or [])}\n\n"
                 f"Assigned goal directory and process cwd:\n{goal_directory}\n\n"
                 "Assign exactly one JSON-compatible object to __agent_result__. "
-                "The trusted runner serializes it with allow_nan=False."
+                "The trusted runner serializes it with allow_nan=False.\n\n"
+                + PYTHON_RESULT_SKELETON
             ),
         },
     ]
@@ -231,6 +276,7 @@ def build_python_repair_messages(
     staged_file_paths: list[str],
     goal_directory: str,
     repair_history: list[dict[str, object]] | None = None,
+    approved_artifacts: list[dict[str, str | None]] | None = None,
 ) -> list[dict[str, str]]:
     """Supply repair only the fixed goal, code, local failure, and allowlist."""
     return [
@@ -246,6 +292,8 @@ def build_python_repair_messages(
                 f"Execution error:\n{error or 'none'}\n\n"
                 "Allowed libraries: Python standard library, pandas, numpy, scipy.\n"
                 f"Allowed files:\n{json.dumps(staged_file_paths)}\n\n"
+                "Verifier-approved prerequisite artifacts:\n"
+                f"{json.dumps(approved_artifacts or [])}\n\n"
                 f"Allowed output directory and process cwd:\n{goal_directory}\n\n"
                 "Recent compact repair history:\n"
                 f"{json.dumps(repair_history or [], ensure_ascii=False)}\n\n"
@@ -254,6 +302,10 @@ def build_python_repair_messages(
                 "outputs.\n\n"
                 "Assign the JSON-compatible result object to __agent_result__; the "
                 "trusted runner owns serialization and stdout is not authoritative.\n\n"
+                "Deterministic diagnosis to repair:\n"
+                f"{error or failure_category}\n\n"
+                + PYTHON_RESULT_SKELETON
+                + "\n"
                 "If this is a PythonPolicyError, repair using only the exact "
                 "absolute paths above as direct literals. Do not use __file__, "
                 "os.path, environment values, globbing, loops, or function "

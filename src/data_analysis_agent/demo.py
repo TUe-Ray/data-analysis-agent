@@ -156,6 +156,7 @@ def _write_workflow_log(
                 "Token usage: " + json.dumps(exchange.token_usage, ensure_ascii=False),
                 f"API requests: {exchange.api_request_count}",
                 f"Transport retries: {exchange.transport_retry_count}",
+                f"Finish reason: {exchange.finish_reason or 'unknown'}",
                 f"Error: {exchange.error or 'none'}",
                 "",
             ]
@@ -185,7 +186,7 @@ def _write_workflow_log(
                 result.get("validated_final_answer"), indent=2, ensure_ascii=False
             ),
             f"Final status: {result['status']}",
-            f"Final answer:\n{result['final_answer']}",
+            f"Final answer:\n{result.get('final_answer', 'none')}",
         ]
     )
     try:
@@ -393,7 +394,7 @@ def format_workflow_result(
             f"Local code repairs        : {result.get('code_repair_count', 0)}",
             "",
             "JSON:",
-            result["final_answer"],
+            result.get("final_answer", "none"),
             "",
             f"Detailed log: {log_path}",
             f"Run artifacts: {result.get('run_directory', log_path.parent)}",

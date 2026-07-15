@@ -270,7 +270,10 @@ def test_staging_and_python_policy_exclude_private_files(task, tmp_path: Path) -
 
     private_reference = Path(task.private.reference_path)
     result = LocalPythonRunner().run(
-        code=f"print(open({str(private_reference)!r}).read())\n",
+        code=(
+            f"print(open({str(private_reference)!r}).read())\n"
+            "__agent_result__ = {}\n"
+        ),
         goal_directory=attempt / "execution",
         allowed_files=[(attempt / path).resolve() for path in public.data_files],
         version=1,

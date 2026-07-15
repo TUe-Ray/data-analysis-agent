@@ -78,10 +78,10 @@ def _repair(code: str, category: str = "runtime_error") -> str:
 @pytest.mark.parametrize(
     ("bad_code", "category"),
     [
-        ("def broken(:\n", "syntax_error"),
-        ("raise RuntimeError('broken')\n", "runtime_error"),
-        ("import socket\n", "policy_error"),
-        ("print('not json')\n", "result_contract_error"),
+        ("def broken(:\n", "generation_contract_error"),
+        ("raise RuntimeError('broken')\n__agent_result__ = {}\n", "runtime_error"),
+        ("import socket\n__agent_result__ = {}\n", "policy_error"),
+        ("__agent_result__ = [1]\n", "result_contract_error"),
     ],
 )
 def test_failed_generated_code_repairs_without_calling_verifier(
@@ -119,7 +119,7 @@ def test_timeout_repairs_without_calling_verifier_on_failed_attempt(
             "planner": [_plan("G1")],
             "executor": [
                 _strategy(),
-                _generation("import time\ntime.sleep(1)\n"),
+                _generation("import time\ntime.sleep(1)\n__agent_result__ = {}\n"),
                 _repair(GOOD_CODE, "timeout"),
             ],
             "verifier": [PASS],
@@ -294,7 +294,7 @@ def test_same_result_contract_family_stops_despite_error_and_source_variants(
             "planner": [_plan("G1")],
             "executor": [
                 _strategy(),
-                _generation("first = 1\n# result is missing\n"),
+                _generation("__agent_result__ = [0]\n"),
                 _repair("__agent_result__ = [1]\n", "result_contract_error"),
                 _repair(
                     "__agent_result__ = {'bad': {1}}\n",
@@ -320,7 +320,7 @@ def test_same_result_contract_family_stops_despite_error_and_source_variants(
         2,
         3,
     ]
-    assert len({item["error"] for item in records}) == 3
+    assert len({item["error"] for item in records}) == 2
 
 
 def test_superficial_changes_do_not_reset_same_family_counter(tmp_path: Path) -> None:
@@ -331,7 +331,7 @@ def test_superficial_changes_do_not_reset_same_family_counter(tmp_path: Path) ->
                 _strategy(),
                 _generation("first_name = 1\n"),
                 _repair(
-                    "second_name=1  # renamed and reformatted\n",
+                    "second_name=1\n",
                     "result_contract_error",
                 ),
                 _repair("third_name = 1\n", "result_contract_error"),

@@ -17,6 +17,8 @@ Role = Literal[
     "verifier",
     "direct_answer",
     "one_shot_code",
+    "single_agent",
+    "final_checker",
 ]
 
 
@@ -64,6 +66,7 @@ class ModelExchange:
     token_usage: dict[str, int] | None = None
     api_request_count: int = 1
     transport_retry_count: int = 0
+    finish_reason: str | None = None
 
 
 class ScriptedRoleModel:
@@ -77,6 +80,8 @@ class ScriptedRoleModel:
             "verifier": 0,
             "direct_answer": 0,
             "one_shot_code": 0,
+            "single_agent": 0,
+            "final_checker": 0,
         }
         self.calls: list[ModelCall] = []
 
@@ -115,7 +120,34 @@ class ScriptedRoleModel:
         if position >= len(responses):
             raise RuntimeError(f"No scripted {role} response remains")
         self._positions[role] = position + 1
-        return responses[position]
+        response = responses[position]
+        # Historical deterministic fixtures used a single ``code`` field.  Keep
+        # that adapter confined to the scripted test double; the live client is
+        # given only the line-oriented production JSON Schema and never accepts
+        # this raw-string fallback.
+        if schema_name in {
+            "python_generation",
+            "python_repair",
+            "single_agent_python_generation",
+            "single_agent_python_repair",
+        }:
+            response = _adapt_legacy_scripted_python_contract(response)
+        return response
+
+
+def _adapt_legacy_scripted_python_contract(response: str) -> str:
+    """Convert old in-repository scripted fixtures, without relaxing live IO."""
+    try:
+        parsed = json.loads(response)
+    except json.JSONDecodeError:
+        return response
+    if not isinstance(parsed, dict) or "code" not in parsed or "code_lines" in parsed:
+        return response
+    code = parsed.pop("code")
+    if not isinstance(code, str):
+        return response
+    parsed["code_lines"] = code.splitlines()
+    return json.dumps(parsed, ensure_ascii=False)
 
 
 class NebiusRoleModel:
@@ -140,6 +172,7 @@ class NebiusRoleModel:
         self.last_token_usage: dict[str, int] | None = None
         self.last_api_request_count = 0
         self.last_transport_retry_count = 0
+        self.last_finish_reason: str | None = None
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
         """Send a role-specific request through the OpenAI-compatible client."""
@@ -199,6 +232,7 @@ class NebiusRoleModel:
         self.last_token_usage = None
         self.last_api_request_count = 0
         self.last_transport_retry_count = 0
+        self.last_finish_reason = None
         arguments: dict[str, object] = {
             "model": self._model,
             "messages": messages,
@@ -230,7 +264,12 @@ class NebiusRoleModel:
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        self.last_finish_reason = (
+            str(finish_reason) if finish_reason is not None else None
+        )
+        content = choice.message.content
         if not content:
             raise RuntimeError("Nebius returned an empty model response")
         return content
@@ -304,6 +343,7 @@ class RecordingRoleModel:
                     token_usage=_token_usage(self._model),
                     api_request_count=_request_count(self._model),
                     transport_retry_count=_retry_count(self._model),
+                    finish_reason=_finish_reason(self._model),
                 )
             )
             if self._call_observer:
@@ -319,6 +359,7 @@ class RecordingRoleModel:
                 token_usage=_token_usage(self._model),
                 api_request_count=_request_count(self._model),
                 transport_retry_count=_retry_count(self._model),
+                finish_reason=_finish_reason(self._model),
             )
         )
         if self._call_observer:
@@ -340,6 +381,11 @@ def _request_count(model: RoleModel) -> int:
 def _retry_count(model: RoleModel) -> int:
     value = getattr(model, "last_transport_retry_count", 0)
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _finish_reason(model: RoleModel) -> str | None:
+    value = getattr(model, "last_finish_reason", None)
+    return value if isinstance(value, str) else None
 
 
 def build_scripted_model(scenario: str) -> ScriptedRoleModel:

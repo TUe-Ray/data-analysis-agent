@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from data_analysis_agent.benchmark_progress import ProgressCallback, ProgressEvent
 from data_analysis_agent.benchmark_types import (
@@ -17,11 +17,19 @@ from data_analysis_agent.benchmark_types import (
     BenchmarkConfig,
     PublicTaskView,
 )
+from data_analysis_agent.config import code_repair_settings
 from data_analysis_agent.demo import write_workflow_log
 from data_analysis_agent.final_output import DeterministicFinalOutputProvider
 from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import RecordingRoleModel, RoleModel
-from data_analysis_agent.python_runner import LocalPythonRunner
+from data_analysis_agent.prompts import build_python_repair_messages
+from data_analysis_agent.python_runner import LocalPythonRunner, PythonExecutionResult
+from data_analysis_agent.schemas import (
+    FinalCheckerOutput,
+    IntermediateGoal,
+    PythonGeneration,
+    PythonRepair,
+)
 from data_analysis_agent.state import AgentState
 
 ModelFactory = Callable[[Approach, PublicTaskView], RoleModel]
@@ -46,6 +54,22 @@ operations, and write only in the execution directory. Print exactly one JSON
 object matching the public answer schema as the final non-empty stdout line.
 Return only Python source without Markdown fences or explanation. The script is
 executed once and will not be repaired."""
+
+SINGLE_AGENT_SYSTEM_PROMPT = """You are a single iterative data-analysis agent.
+Solve the complete public task by returning one PythonGeneration JSON object. Its
+code_lines must be one physical, comment-free Python source line each. Read only
+the stated staged paths, write only inside the assigned execution directory, and
+assign the complete public answer-schema object to module-level __agent_result__.
+The result must contain only JSON-compatible values. Use concise code; a trusted
+runner owns result serialization. Mechanical failures may receive a bounded repair,
+but there is no Planner or per-goal Verifier in this approach."""
+
+FINAL_CHECKER_SYSTEM_PROMPT = """You are an independent final completeness
+checker. Assess the public task, public answer schema, candidate answer, factual
+execution result, artifact summary, and limitations. Return exactly one
+FinalCheckerOutput JSON object. Return PASS only if the candidate is complete and
+supported. Return REPAIR with concise actionable missing-field or completeness
+feedback otherwise. You do not write code and are called exactly once."""
 
 
 def build_direct_answer_messages(public: PublicTaskView) -> list[dict[str, str]]:
@@ -88,6 +112,72 @@ def build_one_shot_code_messages(public: PublicTaskView) -> list[dict[str, str]]
     ]
 
 
+def build_single_agent_messages(
+    public: PublicTaskView, run_directory: Path
+) -> list[dict[str, str]]:
+    """Give the ablation's sole analysis agent the same public task boundary."""
+    return [
+        {"role": "system", "content": SINGLE_AGENT_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Task ID: {public.task_id}\n\nTask prompt:\n{public.prompt}\n\n"
+                f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                f"Allowed staged input paths:\n{json.dumps(public.data_files)}\n\n"
+                f"Assigned execution directory:\n{run_directory}\n\n"
+                "Return the complete answer-schema object in __agent_result__."
+            ),
+        },
+    ]
+
+
+def build_final_checker_messages(
+    *,
+    public: PublicTaskView,
+    candidate: dict[str, JsonValue],
+    execution: dict[str, JsonValue],
+) -> list[dict[str, str]]:
+    """Keep final checking independent from the single-agent role history."""
+    return [
+        {"role": "system", "content": FINAL_CHECKER_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Task prompt:\n{public.prompt}\n\n"
+                f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                f"Final candidate answer:\n{json.dumps(candidate)}\n\n"
+                f"Factual execution result:\n{json.dumps(execution)}\n\n"
+                "Artifacts and limitations: no unregistered artifacts; the candidate's "
+                "limitations field is authoritative."
+            ),
+        },
+    ]
+
+
+def build_final_answer_repair_messages(
+    *, public: PublicTaskView, candidate: dict[str, JsonValue], feedback: str
+) -> list[dict[str, str]]:
+    """Request the one allowed global answer-only repair from the analysis model."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Repair one final JSON answer. Return exactly one JSON object "
+                "matching the public answer schema, without Markdown or explanation. "
+                "This is the "
+                "only global answer repair; do not return Python."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Task prompt:\n{public.prompt}\n\n"
+                f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                f"Candidate to repair:\n{json.dumps(candidate)}\n\n"
+                f"Independent checker feedback:\n{feedback}"
+            ),
+        },
+    ]
 def _content_key(public: PublicTaskView, staged_name: str) -> str:
     if staged_name in public.data_contents:
         return staged_name
@@ -155,6 +245,8 @@ def _model_observer(progress: ProgressCallback | None):
             "verifier": "Verifier",
             "direct_answer": "Direct answer",
             "one_shot_code": "Code generation",
+            "single_agent": "Single agent",
+            "final_checker": "Final checker",
         }
         label = labels[role]
         if phase == "start":
@@ -356,6 +448,250 @@ def run_one_shot_code(
     )
 
 
+def _validate_against_public_schema(
+    value: object, schema: object, path: str = "$") -> None:
+    """Validate the repository's JSON-Schema subset without private grader access."""
+    if not isinstance(schema, dict):
+        return
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        raise ValueError(f"{path} must be one of {enum}")
+    kind = schema.get("type")
+    if kind == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object")
+        required = schema.get("required", [])
+        if isinstance(required, list):
+            missing = [item for item in required if item not in value]
+            if missing:
+                raise ValueError(f"{path} is missing required field(s): {missing}")
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
+        if schema.get("additionalProperties") is False:
+            unexpected = [key for key in value if key not in properties]
+            if unexpected:
+                raise ValueError(f"{path} has unexpected field(s): {unexpected}")
+        for key, nested_schema in properties.items():
+            if key in value:
+                _validate_against_public_schema(
+                    value[key], nested_schema, f"{path}.{key}"
+                )
+    elif kind == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be an array")
+        item_schema = schema.get("items")
+        for index, item in enumerate(value):
+            _validate_against_public_schema(item, item_schema, f"{path}[{index}]")
+    elif kind == "string" and not isinstance(value, str):
+        raise ValueError(f"{path} must be a string")
+    elif kind == "integer" and (
+        not isinstance(value, int) or isinstance(value, bool)
+    ):
+        raise ValueError(f"{path} must be an integer")
+    elif kind == "number" and (
+        not isinstance(value, (int, float)) or isinstance(value, bool)
+    ):
+        raise ValueError(f"{path} must be a number")
+
+
+def _single_agent_status(execution: PythonExecutionResult | None) -> str:
+    """Map shared runner facts to the benchmark's public attempt status."""
+    if execution is None:
+        return "error"
+    if execution.timed_out:
+        return "timed_out"
+    if (execution.error or "").startswith("PythonPolicyError:"):
+        return "python_policy_failure"
+    return "execution_failed"
+
+
+def run_single_agent_checker(
+    *,
+    public: PublicTaskView,
+    model: RoleModel,
+    run_directory: Path,
+    config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
+) -> ApproachOutcome:
+    """Run one iterative code agent and exactly one independent final checker."""
+    recorder = RecordingRoleModel(model, _model_observer(progress))
+    execution_directory = run_directory / "single_agent_run"
+    goal = IntermediateGoal(
+        goal_id="single_analysis",
+        objective="Produce the complete public answer-schema object.",
+        required_outputs=["complete answer-schema object"],
+        constraints=["Use only the staged public files."],
+        success_criteria=["The answer is valid and JSON-compatible."],
+    )
+    runner = LocalPythonRunner(
+        timeout_seconds=config.timeout_seconds,
+        progress_callback=(
+            lambda message: _progress(progress, "activity", message=message)
+            if progress
+            else None
+        ),
+    )
+    max_repairs, no_progress_limit = code_repair_settings()
+    execution: PythonExecutionResult | None = None
+    source = ""
+    local_repairs = 0
+    same_family = 0
+    previous_family: str | None = None
+    error: str | None = None
+    exception_class: str | None = None
+    checker_decisions: list[str] = []
+    checker_repairs = 0
+    try:
+        for version in range(1, max_repairs + 2):
+            if version == 1:
+                raw = recorder.generate_structured(
+                    role="single_agent",
+                    messages=build_single_agent_messages(public, execution_directory),
+                    schema_name="single_agent_python_generation",
+                    schema=PythonGeneration.model_json_schema(),
+                )
+                contract_class: type[PythonGeneration] | type[PythonRepair] = (
+                    PythonGeneration
+                )
+                artifact_name = "python_generation"
+            else:
+                local_repairs += 1
+                previous = execution
+                raw = recorder.generate_structured(
+                    role="single_agent",
+                    messages=build_python_repair_messages(
+                        current_goal=goal.model_dump(mode="json"),
+                        code=source,
+                        failure_category=(
+                            previous.failure_category
+                            if previous
+                            else "generation_contract_error"
+                        )
+                        or "generation_contract_error",
+                        stdout=previous.stdout if previous else "",
+                        stderr=previous.stderr if previous else "",
+                        error=previous.error if previous else error,
+                        staged_file_paths=[
+                            str(path)
+                            for path in _resolved_public_files(public, run_directory)
+                        ],
+                        goal_directory=str(execution_directory),
+                        repair_history=[],
+                    ),
+                    schema_name="single_agent_python_repair",
+                    schema=PythonRepair.model_json_schema(),
+                )
+                contract_class = PythonRepair
+                artifact_name = "python_repair"
+            raw_path = execution_directory / f"{artifact_name}_v{version}.json"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(raw, encoding="utf-8")
+            try:
+                contract = contract_class.model_validate_json(raw)
+            except ValidationError as validation_error:
+                error = f"GenerationContractError: {validation_error}"
+                execution = None
+                family = "generation_contract_error"
+            else:
+                source = contract.source()
+                execution = runner.run(
+                    code=source,
+                    goal_directory=execution_directory,
+                    allowed_files=_resolved_public_files(public, run_directory),
+                    version=version,
+                )
+                if execution.success:
+                    break
+                error = execution.error
+                family = execution.failure_category or "runtime_error"
+            same_family = same_family + 1 if family == previous_family else 1
+            previous_family = family
+            if same_family >= no_progress_limit or version > max_repairs:
+                break
+        if execution is None or not execution.success:
+            status = _single_agent_status(execution)
+            if execution is None:
+                status = "execution_failed"
+            candidate = None
+        else:
+            candidate = execution.result
+            _validate_against_public_schema(candidate, public.answer_schema)
+            checker_raw = recorder.generate_structured(
+                role="final_checker",
+                messages=build_final_checker_messages(
+                    public=public,
+                    candidate=candidate,
+                    execution=execution.model_dump(mode="json"),
+                ),
+                schema_name="single_agent_final_checker",
+                schema=FinalCheckerOutput.model_json_schema(),
+            )
+            checker_path = execution_directory / "final_checker_response.json"
+            checker_path.write_text(checker_raw, encoding="utf-8")
+            checker = FinalCheckerOutput.model_validate_json(checker_raw)
+            checker_decisions = [checker.decision]
+            checker_repairs = 0
+            if checker.decision == "REPAIR":
+                checker_repairs = 1
+                repaired_raw = recorder.generate(
+                    role="single_agent",
+                    messages=build_final_answer_repair_messages(
+                        public=public,
+                        candidate=candidate,
+                        feedback=checker.feedback,
+                    ),
+                )
+                repair_path = execution_directory / "final_answer_repair_response.json"
+                repair_path.write_text(repaired_raw, encoding="utf-8")
+                candidate = _parse_object(repaired_raw)
+                _validate_against_public_schema(candidate, public.answer_schema)
+            _save_json(run_directory / "candidate.json", candidate)
+            status = "completed"
+            error = None
+    except (ValueError, ValidationError) as exception:
+        candidate = None
+        status = "invalid_json"
+        error = f"{type(exception).__name__}: {exception}"
+    except Exception as exception:
+        candidate = None
+        exception_class = type(exception).__name__
+        status = "infrastructure_error" if _infrastructure_error(exception) else "error"
+        error = f"{type(exception).__name__}: {exception}"
+    prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
+    api_call_count, retry_count = _call_counts(recorder)
+    return ApproachOutcome(
+        status=status,
+        candidate=candidate,
+        api_call_count=api_call_count,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        transport_retry_count=retry_count,
+        execution_exit_code=execution.exit_code if execution else None,
+        timed_out=execution.timed_out if execution else False,
+        generated_script_count=(
+            sum(
+                (execution_directory / f"generated_code_v{version}.py").is_file()
+                for version in range(1, local_repairs + 2)
+            )
+        ),
+        local_repair_count=local_repairs,
+        global_replan_count=0,
+        global_checker_repair_count=checker_repairs,
+        run_error=error,
+        error_category=(
+            "transport_api"
+            if status == "infrastructure_error"
+            else "python_policy"
+            if status == "python_policy_failure"
+            else None
+        ),
+        exception_class=(exception_class if status == "infrastructure_error" else None),
+        verifier_decisions=checker_decisions,
+    )
+
+
 def _agent_input_context(public: PublicTaskView) -> str:
     sections = []
     for path in public.data_files:
@@ -392,6 +728,7 @@ def run_agent(
             "run_directory": str(agent_directory),
             "replan_count": 0,
             "max_replans": 1,
+            "stop_after_goals": config.stop_after_goals,
             "output_repair_count": 0,
             "max_output_repairs": 1,
             "output_validation_history": [],
@@ -541,13 +878,40 @@ def run_agent(
             result=result,
             exchanges=recorder.exchanges,
         )
-        candidate = result.get("validated_final_answer")
+        partial_run = config.stop_after_goals is not None
+        partial_reached = bool(result.get("partial_run_reached", False))
+        completed_goals = list(result.get("completed_goal_results", []))
+        partial_goal_id = (
+            str(completed_goals[-1].get("goal_id")) if completed_goals else None
+        )
+        if partial_run:
+            partial_summary = {
+                "requested_stop_after_goals": config.stop_after_goals,
+                "target_reached": partial_reached,
+                "goal_id": partial_goal_id,
+                "execution_status": (
+                    completed_goals[-1].get("success") if completed_goals else False
+                ),
+                "verifier_decision": result.get("verification_decision"),
+                "repair_counts": {
+                    "mechanical": result.get("code_repair_count", 0),
+                    "scientific_replans": result.get("replan_count", 0),
+                },
+                "result_artifacts": (
+                    completed_goals[-1].get("artifact_paths", [])
+                    if completed_goals
+                    else []
+                ),
+                "run_id": result.get("run_id"),
+            }
+            _save_json(agent_directory / "partial_run_summary.json", partial_summary)
+        candidate = None if partial_run else result.get("validated_final_answer")
         if candidate is not None:
             _save_json(run_directory / "candidate.json", candidate)
         workflow_status = str(result.get("status"))
         status = (
             "completed"
-            if workflow_status == "completed"
+            if workflow_status == "completed" or partial_reached
             else "python_policy_failure"
             if workflow_status == "python_policy_failure"
             else "error"
@@ -589,6 +953,9 @@ def run_agent(
         timed_out = False
         decisions = []
         scripts = repairs = replans = 0
+        partial_run = config.stop_after_goals is not None
+        partial_reached = False
+        partial_goal_id = None
     prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
     api_call_count, retry_count = _call_counts(recorder)
     return ApproachOutcome(
@@ -614,6 +981,9 @@ def run_agent(
         ),
         exception_class=(exception_class if status == "infrastructure_error" else None),
         verifier_decisions=decisions,
+        partial_run=partial_run,
+        partial_run_reached=partial_reached,
+        partial_goal_id=partial_goal_id,
     )
 
 
@@ -639,6 +1009,14 @@ def run_approach(
         )
     elif approach == "one_shot_code":
         outcome = run_one_shot_code(
+            public=public,
+            model=model,
+            run_directory=run_directory,
+            config=config,
+            progress=progress,
+        )
+    elif approach == "single_agent_checker":
+        outcome = run_single_agent_checker(
             public=public,
             model=model,
             run_directory=run_directory,

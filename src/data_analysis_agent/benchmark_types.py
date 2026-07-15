@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-Approach = Literal["direct_answer", "one_shot_code", "agent"]
+Approach = Literal["direct_answer", "one_shot_code", "agent", "single_agent_checker"]
 AttemptStatus = Literal[
     "completed",
     "wrong_answer",
@@ -79,6 +79,7 @@ class BenchmarkConfig(BaseModel):
     approaches: list[Approach]
     live: bool = False
     live_progress: bool = True
+    stop_after_goals: int | None = Field(default=None, gt=0)
 
 
 class ApproachOutcome(BaseModel):
@@ -98,11 +99,15 @@ class ApproachOutcome(BaseModel):
     generated_script_count: int = 0
     local_repair_count: int = 0
     global_replan_count: int = 0
+    global_checker_repair_count: int = 0
     run_error: str | None = None
     error_category: str | None = None
     exception_class: str | None = None
     not_applicable_reason: str | None = None
     verifier_decisions: list[str] = Field(default_factory=list)
+    partial_run: bool = False
+    partial_run_reached: bool = False
+    partial_goal_id: str | None = None
 
 
 class BenchmarkResult(BaseModel):
@@ -131,6 +136,7 @@ class BenchmarkResult(BaseModel):
     generated_script_count: int
     local_repair_count: int
     global_replan_count: int
+    global_checker_repair_count: int = 0
     final_candidate_json: dict[str, JsonValue] | None
     artifact_directory: str
     run_error: str | None = None
@@ -138,6 +144,9 @@ class BenchmarkResult(BaseModel):
     exception_class: str | None = None
     not_applicable_reason: str | None = None
     verifier_decisions: list[str] = Field(default_factory=list)
+    partial_run: bool = False
+    partial_run_reached: bool = False
+    partial_goal_id: str | None = None
 
 
 class ApproachMetrics(BaseModel):
@@ -157,6 +166,7 @@ class ApproachMetrics(BaseModel):
     average_generated_script_versions: float
     average_local_repair_count: float
     average_global_replan_count: float
+    average_global_checker_repair_count: float = 0.0
 
 
 class BenchmarkSummary(BaseModel):

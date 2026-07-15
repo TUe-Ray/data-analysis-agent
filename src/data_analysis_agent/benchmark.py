@@ -38,7 +38,12 @@ from data_analysis_agent.nebius_client import create_nebius_client
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TASKS_ROOT = PROJECT_ROOT / "benchmark_tasks"
 DEFAULT_RUNS_ROOT = PROJECT_ROOT / "benchmark_runs"
-ALL_APPROACHES: list[Approach] = ["direct_answer", "one_shot_code", "agent"]
+ALL_APPROACHES: list[Approach] = [
+    "direct_answer",
+    "one_shot_code",
+    "agent",
+    "single_agent_checker",
+]
 
 
 class BenchmarkError(ValueError):
@@ -53,8 +58,11 @@ def _slug(value: str, *, limit: int = 48) -> str:
 
 def benchmark_scope_label(config: BenchmarkConfig) -> str:
     """Describe whether this is a single, three-way, or partial comparison."""
-    if set(config.approaches) == set(ALL_APPROACHES):
+    established_three_way = {"direct_answer", "one_shot_code", "agent"}
+    if set(config.approaches) == established_three_way:
         return "three_way"
+    if set(config.approaches) == set(ALL_APPROACHES):
+        return "four_way"
     if len(config.approaches) == 1:
         return f"{config.approaches[0]}_only"
     return "-vs-".join(config.approaches)
@@ -122,6 +130,30 @@ __agent_result__ = {{"mean_absolute_successive_difference": value}}
             "summary": "Compute the successive-difference statistic.",
         }
     )
+    single_agent_code = f"""import csv
+import io
+
+with io.StringIO({data_content!r}) as handle:
+    values = [float(row["value"]) for row in csv.DictReader(handle) if row["value"]]
+differences = [abs(right - left) for left, right in zip(values, values[1:])]
+value = sum(differences) / len(differences)
+__agent_result__ = {{
+    "status": "completed",
+    "answer": "The requested statistic was computed from non-missing values.",
+    "key_results": {{"mean_absolute_successive_difference": value}},
+    "limitations": [],
+}}
+"""
+    single_agent_generation = json.dumps(
+        {
+            "kind": "python",
+            "code": single_agent_code,
+            "summary": "Compute the complete smoke-task answer.",
+        }
+    )
+    final_checker = json.dumps(
+        {"decision": "PASS", "feedback": "The candidate is complete."}
+    )
     one_shot_code = f"""import csv
 import json
 
@@ -177,6 +209,12 @@ print(json.dumps({{
         "planner": [plan] if approach == "agent" else [],
         "executor": [strategy, structured_code] if approach == "agent" else [],
         "verifier": [verifier] if approach == "agent" else [],
+        "single_agent": [single_agent_generation]
+        if approach == "single_agent_checker"
+        else [],
+        "final_checker": [final_checker]
+        if approach == "single_agent_checker"
+        else [],
     }
     return ScriptedRoleModel(responses)  # type: ignore[arg-type]
 
@@ -245,6 +283,11 @@ def _metrics(results: list[BenchmarkResult]) -> dict[str, ApproachMetrics]:
             ),
             average_global_replan_count=(
                 fmean(result.global_replan_count for result in attempted)
+                if attempted
+                else 0.0
+            ),
+            average_global_checker_repair_count=(
+                fmean(result.global_checker_repair_count for result in attempted)
                 if attempted
                 else 0.0
             ),
@@ -319,7 +362,18 @@ def run_benchmark(
                             "message": f"Approach — completed in {latency:.1f}s",
                         }
                     )
-                if outcome.status == "infrastructure_error":
+                if outcome.partial_run:
+                    grade = None
+                    if renderer:
+                        renderer.emit(
+                            {
+                                "type": "activity",
+                                "message": (
+                                    "Full-task grading skipped — partial smoke run"
+                                ),
+                            }
+                        )
+                elif outcome.status == "infrastructure_error":
                     grade = None
                     if renderer:
                         renderer.emit(
@@ -355,10 +409,18 @@ def run_benchmark(
                 grade_payload = (
                     grade.model_dump(mode="json")
                     if grade is not None
-                    else {
+                    else (
+                        {
+                            "graded": False,
+                            "reason": "Intentional partial-goal smoke run.",
+                            "target_reached": outcome.partial_run_reached,
+                        }
+                        if outcome.partial_run
+                        else {
                         "graded": False,
                         "reason": "No candidate due to infrastructure error.",
-                    }
+                        }
+                    )
                 )
                 (attempt_directory / "grade.json").write_text(
                     json.dumps(grade_payload, indent=2), encoding="utf-8"
@@ -376,7 +438,14 @@ def run_benchmark(
                     grader_details=(
                         grade.details
                         if grade is not None
-                        else {"error_category": "infrastructure_error"}
+                        else (
+                            {
+                                "error_category": "partial_smoke",
+                                "target_reached": outcome.partial_run_reached,
+                            }
+                            if outcome.partial_run
+                            else {"error_category": "infrastructure_error"}
+                        )
                     ),
                     api_call_count=outcome.api_call_count,
                     prompt_tokens=outcome.prompt_tokens,
@@ -389,6 +458,7 @@ def run_benchmark(
                     generated_script_count=outcome.generated_script_count,
                     local_repair_count=outcome.local_repair_count,
                     global_replan_count=outcome.global_replan_count,
+                    global_checker_repair_count=outcome.global_checker_repair_count,
                     final_candidate_json=outcome.candidate,
                     artifact_directory=relative_to(attempt_directory, project_root),
                     run_error=outcome.run_error,
@@ -396,6 +466,9 @@ def run_benchmark(
                     exception_class=outcome.exception_class,
                     not_applicable_reason=outcome.not_applicable_reason,
                     verifier_decisions=outcome.verifier_decisions,
+                    partial_run=outcome.partial_run,
+                    partial_run_reached=outcome.partial_run_reached,
+                    partial_goal_id=outcome.partial_goal_id,
                 )
                 results.append(result)
                 with results_path.open("a", encoding="utf-8") as handle:
@@ -418,8 +491,14 @@ def format_benchmark_summary(
 ) -> str:
     """Print aggregate comparison without prompts, data, code, or private values."""
     task_label = ", ".join(summary.config.task_ids)
-    if set(summary.config.approaches) == set(ALL_APPROACHES):
+    if set(summary.config.approaches) == {
+        "direct_answer",
+        "one_shot_code",
+        "agent",
+    }:
         mode_label = "three-way comparison"
+    elif set(summary.config.approaches) == set(ALL_APPROACHES):
+        mode_label = "four-way comparison"
     elif len(summary.config.approaches) == 1:
         mode_label = "single approach"
     else:
@@ -434,6 +513,14 @@ def format_benchmark_summary(
         f"Approaches : {', '.join(summary.config.approaches)}",
         f"Model      : {summary.config.model}",
         f"Repeats    : {summary.config.repeats}",
+        *(
+            [
+                "Smoke stop: after "
+                f"{summary.config.stop_after_goals} verifier-PASS goal(s)"
+            ]
+            if summary.config.stop_after_goals is not None
+            else []
+        ),
         "",
         "Approach       Passed   API calls   Tokens   Latency   Status",
         "-" * 64,
@@ -468,6 +555,14 @@ def format_benchmark_summary(
         )
         lines.append(f"{approach}:")
         lines.extend([f"- {error}" for error in errors] or ["- none"])
+    if summary.config.stop_after_goals is not None:
+        lines.extend(["", "PARTIAL SMOKE RESULTS"])
+        for result in results:
+            lines.append(
+                f"{result.approach}/{result.task_id}: "
+                f"goal={result.partial_goal_id or 'none'} "
+                f"target_reached={result.partial_run_reached}"
+            )
     lines.extend(
         [
             "",
@@ -505,6 +600,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float)
     parser.add_argument("--max-output-tokens", type=int, default=4096)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--stop-after-goals",
+        type=int,
+        help=(
+            "Intentionally stop after this many verifier-PASS goals; "
+            "skips full grading."
+        ),
+    )
     parser.add_argument("--tasks-root", type=Path, default=DEFAULT_TASKS_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_RUNS_ROOT)
     return parser
@@ -529,6 +632,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             approaches=args.approaches,
             live=args.live,
             live_progress=args.live_progress,
+            stop_after_goals=args.stop_after_goals,
         )
         summary, results = run_benchmark(
             config=config,
@@ -539,6 +643,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Benchmark failed: {error}", file=sys.stderr)
         return 1
     print(format_benchmark_summary(summary, results))
+    if args.stop_after_goals is not None:
+        return int(
+            not all(
+                result.partial_run and result.partial_run_reached
+                for result in results
+            )
+        )
     return 0
 
 

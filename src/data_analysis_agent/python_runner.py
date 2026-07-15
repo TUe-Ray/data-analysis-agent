@@ -8,11 +8,13 @@ environment, a timeout, and bounded captured output. It is not an OS-level jail.
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import subprocess
 import sys
 import time
+import tokenize
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,6 +106,54 @@ class PythonExecutionResult(BaseModel):
 
 class PythonPolicyError(ValueError):
     """Raised when generated source violates the prototype AST policy."""
+
+
+class PythonCodeContractError(ValueError):
+    """Raised before execution when generated source violates its strict contract."""
+
+
+def validate_generated_python_contract(code: str) -> None:
+    """Require executable, comment-free module source with an explicit result.
+
+    This check deliberately happens before sandbox policy validation and before a
+    generated file is written.  Textual mentions of the result variable are not
+    sufficient: the assignment must be an unconditional statement in the module
+    body so the trusted runner can reliably retrieve it after ``runpy.run_path``.
+    """
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        for token in tokens:
+            if token.type == tokenize.COMMENT:
+                raise PythonCodeContractError(
+                    "generated source contains prohibited comments"
+                )
+    except tokenize.TokenError as error:
+        raise PythonCodeContractError(
+            f"generated source does not tokenize: {error}"
+        ) from error
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as error:
+        raise PythonCodeContractError(
+            f"generated source does not parse: {error.msg}"
+        ) from error
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            if any(
+                isinstance(target, ast.Name) and target.id == RESULT_VARIABLE
+                for target in statement.targets
+            ):
+                return
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == RESULT_VARIABLE
+            and statement.value is not None
+        ):
+            return
+    raise PythonCodeContractError(
+        f"missing executable module-level assignment to {RESULT_VARIABLE}"
+    )
 
 
 def _static_path_value(
@@ -492,23 +542,9 @@ class LocalPythonRunner:
             else goal_directory.resolve()
         )
         script_path = goal_directory / f"generated_code_v{version}.py"
-        script_path.write_text(code, encoding="utf-8")
         generated_outputs = goal_directory / "generated_outputs"
         result_path = generated_outputs / "result.json"
-        try:
-            result_path.unlink()
-        except FileNotFoundError:
-            pass
         runner_path: Path | None = None
-        if result_mode == "agent_variable":
-            generated_outputs.mkdir(parents=True, exist_ok=True)
-            runner_path = goal_directory / f"runner_entry_v{version}.py"
-            runner_path.write_text(
-                _trusted_runner_source(
-                    script_path=script_path.resolve(), result_path=result_path.resolve()
-                ),
-                encoding="utf-8",
-            )
         started = time.perf_counter()
         if self.progress_callback:
             self.progress_callback("code execution — starting...")
@@ -524,6 +560,8 @@ class LocalPythonRunner:
         deterministic_result_recovery_attempted = False
 
         try:
+            if result_mode == "agent_variable":
+                validate_generated_python_contract(code)
             validate_generated_code(
                 code,
                 run_directory=goal_directory,
@@ -531,6 +569,21 @@ class LocalPythonRunner:
                 working_directory=execution_directory,
             )
             policy_validated = True
+            script_path.write_text(code, encoding="utf-8")
+            try:
+                result_path.unlink()
+            except FileNotFoundError:
+                pass
+            if result_mode == "agent_variable":
+                generated_outputs.mkdir(parents=True, exist_ok=True)
+                runner_path = goal_directory / f"runner_entry_v{version}.py"
+                runner_path.write_text(
+                    _trusted_runner_source(
+                        script_path=script_path.resolve(),
+                        result_path=result_path.resolve(),
+                    ),
+                    encoding="utf-8",
+                )
             deterministic_result_recovery_attempted = result_mode == "agent_variable"
             environment = {
                 "PATH": os.environ.get("PATH", ""),
@@ -586,6 +639,9 @@ class LocalPythonRunner:
         except PythonPolicyError as error:
             error_message = f"PythonPolicyError: {error}"
             failure_category = "policy_error"
+        except PythonCodeContractError as error:
+            error_message = f"PythonCodeContractError: {error}"
+            failure_category = "generation_contract_error"
         except subprocess.TimeoutExpired as error:
             timed_out = True
             stdout = _bounded_text(error.stdout, self.output_limit)
@@ -604,12 +660,15 @@ class LocalPythonRunner:
         stderr_path.write_text(stderr, encoding="utf-8")
         (goal_directory / "stdout.txt").write_text(stdout, encoding="utf-8")
         (goal_directory / "stderr.txt").write_text(stderr, encoding="utf-8")
-        artifact_paths = [str(script_path), str(stdout_path), str(stderr_path)]
-        if runner_path is not None:
+        artifact_paths = [str(stdout_path), str(stderr_path)]
+        if script_path.is_file():
+            artifact_paths.insert(0, str(script_path))
+        if runner_path is not None and runner_path.is_file():
             artifact_paths.append(str(runner_path))
-        for output_path in sorted(generated_outputs.glob("*")):
-            if output_path.is_file():
-                artifact_paths.append(str(output_path))
+        if generated_outputs.is_dir():
+            for output_path in sorted(generated_outputs.glob("*")):
+                if output_path.is_file():
+                    artifact_paths.append(str(output_path))
         try:
             generated_outputs.rmdir()
         except OSError:

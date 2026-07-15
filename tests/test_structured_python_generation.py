@@ -180,7 +180,7 @@ def test_invalid_repair_response_never_becomes_a_second_script(tmp_path: Path) -
 
     goal = tmp_path / "run/goals/G1"
     assert result["status"] == "mechanical_execution_failed"
-    assert (goal / "generated_code_v1.py").is_file()
+    assert not (goal / "generated_code_v1.py").exists()
     assert not (goal / "generated_code_v2.py").exists()
     assert not (goal / "should_not_exist").exists()
     assert (goal / "python_repair_invalid_v2.txt").is_file()

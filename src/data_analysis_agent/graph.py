@@ -23,6 +23,7 @@ from data_analysis_agent.nodes import (
     mechanical_execution_failure_node,
     output_failure_node,
     output_validator_node,
+    partial_run_finalizer_node,
     planner_output_failure_node,
     planner_validator_node,
     select_current_goal_node,
@@ -35,11 +36,18 @@ from data_analysis_agent.state import AgentState
 def route_after_verification(
     state: AgentState,
 ) -> Literal[
-    "planner", "select_current_goal", "final_answer_generator", "failure_finalizer"
+    "planner",
+    "select_current_goal",
+    "final_answer_generator",
+    "failure_finalizer",
+    "partial_run_finalizer",
 ]:
     """Route validated decisions while enforcing the configured replan bound."""
     decision = state.get("verification_decision")
     if decision == "PASS":
+        target = state.get("stop_after_goals")
+        if target and len(state.get("completed_goal_results", [])) >= target:
+            return "partial_run_finalizer"
         if state.get("high_level_plan") is not None:
             plan = HighLevelPlan.model_validate(state["high_level_plan"])
             if state.get("current_goal_index", 0) < len(plan.goals):
@@ -121,6 +129,7 @@ def build_graph(
     workflow.add_node("planner_output_failure", planner_output_failure_node)
     workflow.add_node("mechanical_failure", mechanical_execution_failure_node)
     workflow.add_node("output_failure", output_failure_node)
+    workflow.add_node("partial_run_finalizer", partial_run_finalizer_node)
 
     workflow.add_edge(START, "planner")
     workflow.add_edge("planner", "planner_validator")
@@ -161,6 +170,7 @@ def build_graph(
             "select_current_goal": "select_current_goal",
             "final_answer_generator": "final_answer_generator",
             "failure_finalizer": "failure_finalizer",
+            "partial_run_finalizer": "partial_run_finalizer",
         },
     )
     workflow.add_edge("final_answer_generator", "output_validator")
@@ -178,4 +188,5 @@ def build_graph(
     workflow.add_edge("planner_output_failure", END)
     workflow.add_edge("mechanical_failure", END)
     workflow.add_edge("output_failure", END)
+    workflow.add_edge("partial_run_finalizer", END)
     return workflow.compile()

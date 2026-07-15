@@ -7,6 +7,7 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    StrictStr,
     TypeAdapter,
     field_validator,
 )
@@ -27,16 +28,24 @@ class PythonGeneration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["python"]
-    code: str = Field(min_length=1)
+    code_lines: list[StrictStr] = Field(min_length=1)
     summary: str
 
-    @field_validator("code")
+    @field_validator("code_lines")
     @classmethod
-    def code_must_not_be_blank(cls, value: str) -> str:
-        """Reject whitespace-only source even though it satisfies min_length."""
-        if not value.strip():
-            raise ValueError("code must contain non-whitespace Python source")
+    def code_lines_are_physical_source_lines(cls, value: list[str]) -> list[str]:
+        """Keep the generated source's physical-line structure explicit."""
+        if any("\n" in line or "\r" in line for line in value):
+            raise ValueError(
+                "each code_lines item must contain exactly one physical line"
+            )
+        if not "\n".join(value).strip():
+            raise ValueError("code_lines must contain non-whitespace Python source")
         return value
+
+    def source(self) -> str:
+        """Reconstruct the only executable representation of this contract."""
+        return "\n".join(self.code_lines) + "\n"
 
 
 class PythonRepair(BaseModel):
@@ -45,17 +54,50 @@ class PythonRepair(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["python_repair"]
-    code: str = Field(min_length=1)
+    code_lines: list[StrictStr] = Field(min_length=1)
     summary: str
     addressed_failure_category: ExecutionFailureCategory
 
-    @field_validator("code")
+    @field_validator("code_lines")
     @classmethod
-    def code_must_not_be_blank(cls, value: str) -> str:
-        """Reject whitespace-only repaired source."""
-        if not value.strip():
-            raise ValueError("code must contain non-whitespace Python source")
+    def code_lines_are_physical_source_lines(cls, value: list[str]) -> list[str]:
+        """Keep repaired source line-oriented as well."""
+        if any("\n" in line or "\r" in line for line in value):
+            raise ValueError(
+                "each code_lines item must contain exactly one physical line"
+            )
+        if not "\n".join(value).strip():
+            raise ValueError("code_lines must contain non-whitespace Python source")
         return value
+
+    def source(self) -> str:
+        """Reconstruct the only executable representation of this contract."""
+        return "\n".join(self.code_lines) + "\n"
+
+
+class GoalArtifact(BaseModel):
+    """A verifier-approved analysis output safe for a dependent goal to read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str = Field(min_length=1)
+    producer_goal_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    relative_name: str = Field(min_length=1)
+    media_type: str | None = None
+    description: str = Field(min_length=1)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(min_length=64, max_length=64)
+
+
+class GoalArtifactDeclaration(BaseModel):
+    """A generated script's explicit request to publish one analysis output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relative_name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    media_type: str | None = None
 
 
 class IntermediateGoal(BaseModel):
@@ -125,6 +167,15 @@ class VerificationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: Literal["PASS", "REPLAN"]
+    feedback: str = Field(min_length=1)
+
+
+class FinalCheckerOutput(BaseModel):
+    """Independent global completeness decision for the ablation approach."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["PASS", "REPAIR"]
     feedback: str = Field(min_length=1)
 
 

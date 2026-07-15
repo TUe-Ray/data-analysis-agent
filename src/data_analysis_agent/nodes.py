@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
+import mimetypes
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -35,6 +37,8 @@ from data_analysis_agent.schemas import (
     ExecutionStrategy,
     FinalAnswer,
     FinalFailureAnswer,
+    GoalArtifact,
+    GoalArtifactDeclaration,
     GoalResult,
     HighLevelPlan,
     IntermediateGoal,
@@ -58,6 +62,24 @@ class ExecutorOutputError(ValueError):
 
 class VerifierOutputError(ValueError):
     """Raised when the Verifier cannot return valid structured output."""
+
+
+class GoalArtifactDeclarationError(ValueError):
+    """Raised when a script tries to publish an unsafe or missing artifact."""
+
+
+def partial_run_finalizer_node(state: AgentState) -> dict[str, object]:
+    """Finish an intentional goal-limited smoke run without making an answer."""
+    completed = list(state.get("completed_goal_results", []))
+    target = state.get("stop_after_goals")
+    if not target or len(completed) < target:
+        raise RuntimeError("partial-run finalizer reached before its requested target")
+    return {
+        "status": "partial_smoke_completed",
+        "final_status": "partial_smoke_completed",
+        "partial_run_reached": True,
+        "trace": _trace(state, "partial_run:target_reached"),
+    }
 
 
 def _trace(state: AgentState, event: str) -> list[str]:
@@ -125,6 +147,18 @@ def _preserve_completed_results(
             and previous_goals.get(str(result.get("goal_id")))
             == revised_goals[str(result.get("goal_id"))]
         )
+    ]
+
+
+def _preserve_approved_artifacts(
+    *, state: AgentState, completed: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Archive artifacts from invalidated goals while retaining their files on disk."""
+    retained_goal_ids = {str(item.get("goal_id")) for item in completed}
+    return [
+        artifact.model_dump(mode="json")
+        for artifact in _active_approved_artifacts(state)
+        if artifact.producer_goal_id in retained_goal_ids
     ]
 
 
@@ -277,6 +311,11 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
         if is_replan and structured
         else ([] if is_replan else list(state.get("completed_goal_results", [])))
     )
+    approved_artifacts = (
+        _preserve_approved_artifacts(state=state, completed=completed)
+        if is_replan and structured
+        else ([] if is_replan else list(state.get("approved_goal_artifacts", [])))
+    )
     completed_ids = {str(item.get("goal_id")) for item in completed}
     next_index = next(
         (
@@ -302,6 +341,7 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
         "high_level_plan": plan.model_dump(mode="json"),
         "structured_plan": structured,
         "completed_goal_results": completed,
+        "approved_goal_artifacts": approved_artifacts,
         "current_goal_index": next_index,
         "planner_validation_error": None,
         "planner_validation_history": [
@@ -365,6 +405,7 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         "python_response_history": [],
         "current_generated_code": "",
         "execution_failure_category": None,
+        "pending_goal_artifacts": [],
     }
 
 
@@ -380,10 +421,140 @@ def _staged_display_paths(state: AgentState) -> list[str]:
     return [str(path) for path in _staged_paths(state)]
 
 
+def _active_approved_artifacts(state: AgentState) -> list[GoalArtifact]:
+    """Load the authoritative verifier-approved registry from graph state."""
+    return [
+        GoalArtifact.model_validate(item)
+        for item in state.get("approved_goal_artifacts", [])
+    ]
+
+
+def _artifacts_available_to_current_goal(state: AgentState) -> list[GoalArtifact]:
+    """Expose only outputs of this goal's completed prerequisite goals."""
+    current = state.get("current_goal")
+    if not isinstance(current, dict):
+        return []
+    dependencies = {str(goal_id) for goal_id in current.get("depends_on", [])}
+    completed = {
+        str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
+    }
+    return [
+        artifact
+        for artifact in _active_approved_artifacts(state)
+        if artifact.producer_goal_id in dependencies
+        and artifact.producer_goal_id in completed
+        and Path(artifact.path).is_file()
+    ]
+
+
+def _allowed_paths(state: AgentState) -> list[Path]:
+    """Combine public staged inputs with dependency-safe approved artifacts."""
+    paths = [*_staged_paths(state)]
+    paths.extend(
+        Path(item.path).resolve()
+        for item in _artifacts_available_to_current_goal(state)
+    )
+    return list(dict.fromkeys(paths))
+
+
+def _approved_artifact_context(state: AgentState) -> list[dict[str, str | None]]:
+    """Provide model-facing provenance without exposing arbitrary goal files."""
+    return [
+        {
+            "producer_goal_id": artifact.producer_goal_id,
+            "path": artifact.path,
+            "description": artifact.description,
+            "media_type": artifact.media_type,
+        }
+        for artifact in _artifacts_available_to_current_goal(state)
+    ]
+
+
+def _is_private_or_diagnostic_artifact(relative_name: Path) -> bool:
+    """Reject runner, source, model, and workflow diagnostics by stable names."""
+    if "generated_outputs" in relative_name.parts:
+        return True
+    name = relative_name.name
+    reserved_prefixes = (
+        "generated_code_v",
+        "runner_entry_v",
+        "stdout",
+        "stderr",
+        "execution_result",
+        "artifact_metadata",
+        "python_generation",
+        "python_repair",
+        "planner_response",
+        "planner_validation",
+    )
+    return name == "workflow.log" or name.startswith(reserved_prefixes)
+
+
+def _declared_goal_artifacts(
+    *, goal: IntermediateGoal, goal_directory: Path, result: dict[str, object]
+) -> list[GoalArtifact]:
+    """Validate explicit, goal-local analysis outputs before verifier approval."""
+    raw_declarations = result.get("artifacts", [])
+    if not isinstance(raw_declarations, list):
+        raise GoalArtifactDeclarationError("artifacts must be a list when supplied")
+    try:
+        declarations = [
+            GoalArtifactDeclaration.model_validate(item) for item in raw_declarations
+        ]
+    except ValidationError as error:
+        raise GoalArtifactDeclarationError(
+            "artifacts must contain only typed artifact declarations"
+        ) from error
+    root = goal_directory.resolve()
+    artifacts: list[GoalArtifact] = []
+    seen_names: set[str] = set()
+    for declaration in declarations:
+        relative_name = Path(declaration.relative_name)
+        if (
+            relative_name.is_absolute()
+            or not relative_name.parts
+            or ".." in relative_name.parts
+            or _is_private_or_diagnostic_artifact(relative_name)
+        ):
+            raise GoalArtifactDeclarationError(
+                "artifact path is not an eligible analysis output: "
+                f"{declaration.relative_name}"
+            )
+        if declaration.relative_name in seen_names:
+            raise GoalArtifactDeclarationError(
+                f"artifact was declared more than once: {declaration.relative_name}"
+            )
+        seen_names.add(declaration.relative_name)
+        path = (root / relative_name).resolve()
+        if root not in path.parents or not path.is_file():
+            raise GoalArtifactDeclarationError(
+                f"declared artifact does not exist inside the current goal directory: "
+                f"{declaration.relative_name}"
+            )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        artifacts.append(
+            GoalArtifact(
+                artifact_id=f"{goal.goal_id}:{declaration.relative_name}:{digest[:12]}",
+                producer_goal_id=goal.goal_id,
+                path=str(path),
+                relative_name=declaration.relative_name,
+                media_type=(
+                    declaration.media_type
+                    if declaration.media_type is not None
+                    else mimetypes.guess_type(path.name)[0]
+                ),
+                description=declaration.description,
+                size_bytes=path.stat().st_size,
+                sha256=digest,
+            )
+        )
+    return artifacts
+
+
 def _registry(state: AgentState) -> TrustedToolRegistry:
-    staged = _staged_paths(state)
-    roots = list(dict.fromkeys(path.parent for path in staged)) or [Path.cwd()]
-    return TrustedToolRegistry(allowed_roots=roots, allowed_files=staged)
+    allowed = _allowed_paths(state)
+    roots = list(dict.fromkeys(path.parent for path in allowed)) or [Path.cwd()]
+    return TrustedToolRegistry(allowed_roots=roots, allowed_files=allowed)
 
 
 class _CanonicalNames(ast.NodeTransformer):
@@ -520,13 +691,25 @@ def _generated_execution_update(
     final = runner.run(
         code=code,
         goal_directory=goal_directory,
-        allowed_files=_staged_paths(state),
+        allowed_files=_allowed_paths(state),
         version=version,
     )
+    pending_artifacts: list[GoalArtifact] = []
+    if final.success:
+        try:
+            pending_artifacts = _declared_goal_artifacts(
+                goal=goal,
+                goal_directory=goal_directory,
+                result=dict(final.result),
+            )
+        except GoalArtifactDeclarationError as error:
+            final.success = False
+            final.error = f"ResultContractError: {error}"
+            final.failure_category = "result_contract_error"
     final.artifact_paths = list(
         dict.fromkeys([*final.artifact_paths, *response_artifacts])
     )
-    return _finalize_generated_attempt(
+    updates = _finalize_generated_attempt(
         state=state,
         strategy=strategy,
         final=final,
@@ -535,6 +718,10 @@ def _generated_execution_update(
         repair_attempts=repair_attempts,
         generated_script_increment=1,
     )
+    updates["pending_goal_artifacts"] = [
+        artifact.model_dump(mode="json") for artifact in pending_artifacts
+    ]
+    return updates
 
 
 def _generation_contract_failure_update(
@@ -723,6 +910,7 @@ def _finalize_generated_attempt(
         "max_code_repair_no_progress_attempts": no_progress_limit,
         "code_repair_no_progress": no_progress,
         "trace": _trace(state, trace_event),
+        "pending_goal_artifacts": [],
     }
 
 
@@ -775,7 +963,8 @@ def make_executor_node(
                 else None
             ),
             capability_catalog=catalog,
-            staged_file_paths=_staged_display_paths(state),
+            staged_file_paths=[str(path) for path in _allowed_paths(state)],
+            approved_artifacts=_approved_artifact_context(state),
         )
         raw_strategy = model.generate(role="executor", messages=messages)
         try:
@@ -823,9 +1012,10 @@ def make_executor_node(
             goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
             source_messages = build_python_generation_messages(
                 current_goal=goal.model_dump(mode="json"),
-                staged_file_paths=[str(path) for path in _staged_paths(state)],
+                staged_file_paths=[str(path) for path in _allowed_paths(state)],
                 completed_goal_results=list(state.get("completed_goal_results", [])),
                 goal_directory=str(goal_directory),
+                approved_artifacts=_approved_artifact_context(state),
             )
             contract, version, response_history, artifacts, contract_error = (
                 _python_contract_response(
@@ -857,7 +1047,7 @@ def make_executor_node(
                     state=generation_state,
                     strategy=strategy,
                     runner=runner,
-                    code=contract.code,
+                    code=contract.source(),
                     materially_changed=True,
                     repair_attempts=0,
                     version=version,
@@ -920,9 +1110,10 @@ def make_mechanical_repair_node(
             stdout=previous.stdout,
             stderr=previous.stderr,
             error=previous.error,
-            staged_file_paths=[str(path) for path in _staged_paths(state)],
+            staged_file_paths=[str(path) for path in _allowed_paths(state)],
             goal_directory=str(Path(state["run_directory"]) / "goals" / goal.goal_id),
             repair_history=history,
+            approved_artifacts=_approved_artifact_context(state),
         )
         contract, version, response_history, artifacts, contract_error = (
             _python_contract_response(
@@ -955,9 +1146,9 @@ def make_mechanical_repair_node(
                 state=repair_state,
                 strategy=strategy,
                 runner=runner,
-                code=contract.code,
+                code=contract.source(),
                 materially_changed=_materially_changed(
-                    state.get("current_generated_code", ""), contract.code
+                    state.get("current_generated_code", ""), contract.source()
                 ),
                 repair_attempts=attempt,
                 version=version,
@@ -1066,6 +1257,40 @@ def make_verifier_node(model: RoleModel) -> Node:
                         *state.get("completed_goal_results", []),
                         state["current_goal_result"],
                     ]
+                    goal_id = str(state["current_goal"]["goal_id"])
+                    pending = [
+                        GoalArtifact.model_validate(item)
+                        for item in state.get("pending_goal_artifacts", [])
+                    ]
+                    if any(item.producer_goal_id != goal_id for item in pending):
+                        raise GoalArtifactDeclarationError(
+                            "pending artifact producer does not match the current goal"
+                        )
+                    approved = [
+                        *[
+                            item
+                            for item in _active_approved_artifacts(state)
+                            if item.producer_goal_id != goal_id
+                        ],
+                        *pending,
+                    ]
+                    registry_path = (
+                        Path(state["run_directory"]) / "approved_goal_artifacts.json"
+                    )
+                    registry_path.parent.mkdir(parents=True, exist_ok=True)
+                    registry_path.write_text(
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in approved],
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                    updates["approved_goal_artifacts"] = [
+                        item.model_dump(mode="json") for item in approved
+                    ]
+                    updates["approved_goal_artifacts_path"] = str(registry_path)
+                    updates["pending_goal_artifacts"] = []
                     updates["current_goal_index"] = index + 1
                 return updates
             except ValidationError as error:
