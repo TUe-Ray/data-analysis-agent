@@ -535,9 +535,9 @@ def test_transport_failure_is_ungraded_infrastructure_error(
     assert not result.graded
     assert result.grader_score is None
     assert result.grader_errors == []
-    assert "starting approach" in output
-    assert "calling model" in output
-    assert "grading skipped" in output
+    assert "BENCHMARK RUN 1/1" in output
+    assert "Direct answer — calling model" in output
+    assert "Grading skipped — infrastructure error" in output
     grade_path = (
         tmp_path / summary.results_path
     ).parent / "direct_answer/successive_difference_smoke/repeat_001/grade.json"
@@ -594,11 +594,12 @@ def test_live_progress_reports_successful_model_and_grading_stages(
     )
 
     output = capsys.readouterr().out
-    assert "[1/1] direct_answer — starting approach" in output
-    assert "model call 1 (direct_answer) — calling model" in output
-    assert "model call 1 (direct_answer) — completed" in output
-    assert "grading candidate" in output
-    assert "grading completed" in output
+    assert output.count("BENCHMARK RUN 1/1") == 1
+    assert "[1/1] direct_answer" not in output
+    assert "Direct answer — calling model" in output
+    assert "Direct answer — completed" in output
+    assert "Grading — starting" in output
+    assert "Grading — completed" in output
 
 
 @pytest.mark.parametrize(

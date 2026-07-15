@@ -316,6 +316,12 @@ code, captured output, candidates, external grades, and agent artifacts are
 saved separately under `benchmark_runs/<benchmark_run_id>/`. That directory is
 gitignored and never mixed with ordinary demo runs.
 
+Live agent runs render a per-attempt benchmark header, Planner-approved goal
+list, and approved `[completed/total]` progress. Interactive terminals redraw
+the current-step panel; redirected output remains append-only and terminal-safe.
+Use `--no-live-progress` to suppress the live presentation layer while retaining
+the saved benchmark artifacts.
+
 Benchmark run directories identify both the task and comparison scope. For
 example:
 

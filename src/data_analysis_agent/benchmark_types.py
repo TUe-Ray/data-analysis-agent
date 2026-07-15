@@ -78,6 +78,7 @@ class BenchmarkConfig(BaseModel):
     task_ids: list[str]
     approaches: list[Approach]
     live: bool = False
+    live_progress: bool = True
 
 
 class ApproachOutcome(BaseModel):

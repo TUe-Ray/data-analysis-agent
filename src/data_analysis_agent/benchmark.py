@@ -11,9 +11,11 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
+from typing import TextIO
 
 from data_analysis_agent.benchmark_approaches import ModelFactory, run_approach
 from data_analysis_agent.benchmark_grading import grade_candidate
+from data_analysis_agent.benchmark_progress import BenchmarkProgressRenderer
 from data_analysis_agent.benchmark_tasks import (
     BenchmarkTaskError,
     load_benchmark_task,
@@ -249,6 +251,8 @@ def run_benchmark(
     output_root: Path = DEFAULT_RUNS_ROOT,
     model_factory: ModelFactory | None = None,
     project_root: Path = PROJECT_ROOT,
+    progress_stream: TextIO | None = None,
+    progress_interactive: bool | None = None,
 ) -> tuple[BenchmarkSummary, list[BenchmarkResult]]:
     """Run all configured approaches independently and grade externally."""
     run_id, run_root = _create_benchmark_run_directory(output_root, config)
@@ -260,25 +264,35 @@ def run_benchmark(
     )
     results: list[BenchmarkResult] = []
     results_path = run_root / "results.jsonl"
-    total_attempts = len(config.task_ids) * config.repeats * len(config.approaches)
-    attempt_number = 0
 
     for task_id in config.task_ids:
         task = load_benchmark_task(tasks_root, task_id)
         for repeat_index in range(1, config.repeats + 1):
             for approach in config.approaches:
-                attempt_number += 1
-                prefix = f"[{attempt_number}/{total_attempts}] {approach}"
-
-                def progress(message: str, *, _prefix: str = prefix) -> None:
-                    if config.live:
-                        print(f"{_prefix} — {message}", flush=True)
-
-                progress("starting approach...")
                 attempt_directory = (
                     run_root / approach / task_id / f"repeat_{repeat_index:03d}"
                 )
                 reset_attempt_directory(attempt_directory)
+                renderer = (
+                    BenchmarkProgressRenderer(
+                        stream=progress_stream,
+                        interactive=progress_interactive,
+                        artifact_path=attempt_directory / "progress_events.jsonl",
+                    )
+                    if config.live and config.live_progress
+                    else None
+                )
+                if renderer:
+                    renderer.emit(
+                        {
+                            "type": "benchmark_started",
+                            "task_id": task_id,
+                            "approach": approach,
+                            "model": config.model,
+                            "repeat_index": repeat_index,
+                            "repeats": config.repeats,
+                        }
+                    )
                 public = stage_public_task(task.public, attempt_directory)
                 started = time.perf_counter()
                 outcome = run_approach(
@@ -287,25 +301,46 @@ def run_benchmark(
                     model_factory=factory,
                     run_directory=attempt_directory,
                     config=config,
-                    progress=progress if config.live else None,
+                    progress=renderer.emit if renderer else None,
                 )
                 latency = time.perf_counter() - started
-                progress(f"approach finished in {latency:.1f}s")
+                if renderer:
+                    renderer.emit(
+                        {
+                            "type": "activity",
+                            "message": f"Approach — completed in {latency:.1f}s",
+                        }
+                    )
                 if outcome.status == "infrastructure_error":
                     grade = None
-                    progress("grading skipped — no candidate from infrastructure error")
+                    if renderer:
+                        renderer.emit(
+                            {
+                                "type": "activity",
+                                "message": "Grading skipped — infrastructure error",
+                            }
+                        )
                 else:
-                    progress("grading candidate...")
+                    if renderer:
+                        renderer.emit(
+                            {"type": "activity", "message": "Grading — starting..."}
+                        )
                     grade_started = time.perf_counter()
                     grade = grade_candidate(
                         outcome.candidate,
                         task.private,
                         candidate_error=outcome.run_error,
                     )
-                    progress(
-                        "grading completed in "
-                        f"{time.perf_counter() - grade_started:.1f}s"
-                    )
+                    if renderer:
+                        renderer.emit(
+                            {
+                                "type": "activity",
+                                "message": (
+                                    "Grading — completed in "
+                                    f"{time.perf_counter() - grade_started:.1f}s"
+                                ),
+                            }
+                        )
                 status = outcome.status
                 if status == "completed" and grade is not None and not grade.passed:
                     status = "wrong_answer"
@@ -454,6 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approaches", type=_parse_approaches, default=ALL_APPROACHES)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument(
+        "--no-live-progress", action="store_false", dest="live_progress"
+    )
     parser.add_argument("--model")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float)
@@ -482,6 +520,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             task_ids=args.task_ids,
             approaches=args.approaches,
             live=args.live,
+            live_progress=args.live_progress,
         )
         summary, results = run_benchmark(
             config=config,

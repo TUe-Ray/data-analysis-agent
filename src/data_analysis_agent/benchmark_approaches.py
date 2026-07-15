@@ -10,6 +10,7 @@ from typing import cast
 
 from pydantic import JsonValue
 
+from data_analysis_agent.benchmark_progress import ProgressCallback, ProgressEvent
 from data_analysis_agent.benchmark_types import (
     Approach,
     ApproachOutcome,
@@ -24,7 +25,13 @@ from data_analysis_agent.python_runner import LocalPythonRunner
 from data_analysis_agent.state import AgentState
 
 ModelFactory = Callable[[Approach, PublicTaskView], RoleModel]
-ProgressCallback = Callable[[str], None]
+
+
+def _progress(progress: ProgressCallback | None, kind: str, **data: object) -> None:
+    """Emit presentation facts without terminal formatting in workflow code."""
+    if progress is not None:
+        progress(ProgressEvent(type=kind, **data))
+
 
 DIRECT_SYSTEM_PROMPT = """Solve the supplied data-analysis task directly.
 Return exactly one JSON object matching the public answer schema. Do not return
@@ -142,13 +149,28 @@ def _model_observer(progress: ProgressCallback | None):
         elapsed: float,
         error: str | None,
     ) -> None:
-        label = f"model call {call_number} ({role})"
+        labels = {
+            "planner": "Planner",
+            "executor": "Executor",
+            "verifier": "Verifier",
+            "direct_answer": "Direct answer",
+            "one_shot_code": "Code generation",
+        }
+        label = labels[role]
         if phase == "start":
-            progress(f"{label} — calling model...")
+            _progress(progress, "activity", message=f"{label} — calling model...")
         elif error:
-            progress(f"{label} — failed after {elapsed:.1f}s")
+            _progress(
+                progress,
+                "error",
+                error=f"{label} — failed after {elapsed:.1f}s: {error}",
+            )
         else:
-            progress(f"{label} — completed in {elapsed:.1f}s")
+            _progress(
+                progress,
+                "activity",
+                message=f"{label} — completed in {elapsed:.1f}s",
+            )
 
     return observe
 
@@ -273,7 +295,13 @@ def run_one_shot_code(
         code = _extract_code(raw)
         execution = LocalPythonRunner(
             timeout_seconds=config.timeout_seconds,
-            progress_callback=progress,
+            progress_callback=(
+                lambda message: (
+                    _progress(progress, "activity", message=message)
+                    if progress
+                    else None
+                )
+            ),
         ).run(
             code=code,
             goal_directory=run_directory / "execution",
@@ -351,41 +379,143 @@ def run_agent(
     exception_class = None
     try:
         if progress:
-            progress("agent workflow — starting...")
+            _progress(progress, "workflow_started")
         workflow_started = time.perf_counter()
         staged_files = _resolved_public_files(public, run_directory)
-        result = cast(
-            AgentState,
-            build_graph(
-                recorder,
-                DeterministicFinalOutputProvider(),
-                LocalPythonRunner(
-                    timeout_seconds=config.timeout_seconds,
-                    progress_callback=progress,
+        initial_state: AgentState = {
+            "question": public.prompt,
+            "file_paths": [Path(path).name for path in public.data_files],
+            "staged_file_paths": [str(path) for path in staged_files],
+            "staged_file_display_paths": list(public.data_files),
+            "execution_working_directory": str(run_directory.resolve()),
+            "input_context": _agent_input_context(public),
+            "run_directory": str(agent_directory),
+            "replan_count": 0,
+            "max_replans": 1,
+            "output_repair_count": 0,
+            "max_output_repairs": 1,
+            "output_validation_history": [],
+            "trace": [],
+            "iteration_history": [],
+        }
+        workflow = build_graph(
+            recorder,
+            DeterministicFinalOutputProvider(),
+            LocalPythonRunner(
+                timeout_seconds=config.timeout_seconds,
+                progress_callback=(
+                    lambda message: (
+                        _progress(progress, "activity", message=message)
+                        if progress
+                        else None
+                    )
                 ),
-            ).invoke(
-                {
-                    "question": public.prompt,
-                    "file_paths": [Path(path).name for path in public.data_files],
-                    "staged_file_paths": [str(path) for path in staged_files],
-                    "staged_file_display_paths": list(public.data_files),
-                    "execution_working_directory": str(run_directory.resolve()),
-                    "input_context": _agent_input_context(public),
-                    "run_directory": str(agent_directory),
-                    "replan_count": 0,
-                    "max_replans": 1,
-                    "output_repair_count": 0,
-                    "max_output_repairs": 1,
-                    "output_validation_history": [],
-                    "trace": [],
-                    "iteration_history": [],
-                }
             ),
         )
+        if progress is None:
+            result = cast(AgentState, workflow.invoke(initial_state))
+        else:
+            result = initial_state
+            trace_size = 0
+            current_goal_id: str | None = None
+            for snapshot in workflow.stream(initial_state, stream_mode="values"):
+                result = cast(AgentState, snapshot)
+                goal = result.get("current_goal")
+                if goal and goal.get("goal_id") != current_goal_id:
+                    current_goal_id = str(goal["goal_id"])
+                    _progress(
+                        progress,
+                        "goal_started",
+                        goal_id=current_goal_id,
+                        objective=str(goal.get("objective", "")),
+                    )
+                trace = result.get("trace", [])
+                for event in trace[trace_size:]:
+                    if event == "executor":
+                        strategy = result.get("current_strategy", {}).get(
+                            "strategy", "unknown"
+                        )
+                        _progress(
+                            progress,
+                            "activity",
+                            message=f"Executor — strategy: {strategy}",
+                        )
+                    elif event == "planner_validation:VALID":
+                        plan = result.get("high_level_plan", {})
+                        goals = plan.get("goals", []) if isinstance(plan, dict) else []
+                        _progress(progress, "plan_available", goals=goals)
+                    elif event == "planner_validation:INVALID":
+                        _progress(
+                            progress, "activity", message="Planner — invalid plan"
+                        )
+                        _progress(
+                            progress,
+                            "error",
+                            error=str(result.get("planner_validation_error", "")),
+                        )
+                    elif event.startswith("planner_repair:attempt_"):
+                        _progress(
+                            progress,
+                            "activity",
+                            message=(
+                                "Planner repair: "
+                                f"[{result.get('planner_repair_count', 0)}/"
+                                f"{result.get('max_planner_repairs', 2)}]"
+                            ),
+                        )
+                    elif event.startswith("code_execution:"):
+                        category = event.split(":", 1)[1]
+                        _progress(
+                            progress,
+                            "activity",
+                            message=f"Code execution — {category}",
+                        )
+                        if category != "success":
+                            goal_result = result.get("current_goal_result", {})
+                            error = goal_result.get("error") if goal_result else None
+                            if error:
+                                _progress(progress, "error", error=f"Error: {error}")
+                    elif event.startswith("mechanical_repair:attempt_"):
+                        repair_attempt = result.get(
+                            "code_repair_attempts_for_current_goal", 0
+                        )
+                        max_repairs = result.get("max_code_repair_attempts", 50)
+                        _progress(
+                            progress,
+                            "activity",
+                            message=(
+                                f"Mechanical repair: [{repair_attempt}/{max_repairs}]"
+                            ),
+                        )
+                    elif event == "verifier:PASS":
+                        _progress(progress, "activity", message="Verifier — PASS")
+                        completed = result.get("completed_goal_results", [])
+                        if completed:
+                            _progress(
+                                progress,
+                                "goal_completed",
+                                goal_id=str(completed[-1]["goal_id"]),
+                            )
+                    elif event == "verifier:REPLAN":
+                        _progress(progress, "activity", message="Verifier — REPLAN")
+                        _progress(
+                            progress,
+                            "activity",
+                            message=(
+                                "Scientific replan: "
+                                f"[{result.get('replan_count', 0) + 1}/"
+                                f"{result.get('max_replans', 1)}]"
+                            ),
+                        )
+                trace_size = len(trace)
         if progress:
-            progress(
-                "agent workflow — completed in "
-                f"{time.perf_counter() - workflow_started:.1f}s"
+            _progress(
+                progress,
+                "activity",
+                message=(
+                    "Agent workflow — completed in "
+                    f"{time.perf_counter() - workflow_started:.1f}s"
+                ),
             )
         agent_directory.mkdir(parents=True, exist_ok=True)
         write_workflow_log(
@@ -425,9 +555,13 @@ def run_agent(
         replans = result.get("replan_count", 0)
     except Exception as exception:
         if progress:
-            progress(
-                "agent workflow — failed in "
-                f"{time.perf_counter() - workflow_started:.1f}s"
+            _progress(
+                progress,
+                "workflow_failed",
+                error=(
+                    "Agent workflow — failed in "
+                    f"{time.perf_counter() - workflow_started:.1f}s"
+                ),
             )
         candidate = None
         exception_class = type(exception).__name__
