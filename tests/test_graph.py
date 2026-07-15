@@ -31,6 +31,8 @@ def test_graph_compiles_successfully() -> None:
 
     assert {
         "planner",
+        "planner_validator",
+        "planner_repair",
         "executor",
         "mechanical_repair",
         "verifier",
@@ -38,6 +40,7 @@ def test_graph_compiles_successfully() -> None:
         "output_validator",
         "output_repair",
         "failure_finalizer",
+        "planner_output_failure",
         "mechanical_failure",
         "output_failure",
     }.issubset(graph.get_graph().nodes)
@@ -51,15 +54,17 @@ def test_happy_path_reaches_finalize_with_pass(tmp_path: Path) -> None:
     assert result["status"] == "completed"
     assert result["replan_count"] == 0
     assert result["trace"] == [
-        "planner",
+        "planner:initial",
+        "planner_validation:VALID",
         "executor",
         "verifier:PASS",
         "final_answer_generator",
         "output_validator:VALID",
     ]
     assert role_counts(model) == {"planner": 1, "executor": 1, "verifier": 1}
-    assert not Path(result["run_directory"]).exists()
-    assert not (tmp_path / "runs").exists()
+    planner_dir = Path(result["run_directory"])
+    assert (planner_dir / "planner_response_v1.json").is_file()
+    assert (planner_dir / "planner_validation_v1.json").is_file()
 
 
 def test_replan_routes_back_and_recovers() -> None:
@@ -70,10 +75,12 @@ def test_replan_routes_back_and_recovers() -> None:
     assert result["verification_decision"] == "PASS"
     assert result["replan_count"] == 1
     assert result["trace"] == [
-        "planner",
+        "planner:initial",
+        "planner_validation:VALID",
         "executor",
         "verifier:REPLAN",
-        "planner",
+        "planner:scientific_replan",
+        "planner_validation:VALID",
         "executor",
         "verifier:PASS",
         "final_answer_generator",
@@ -115,10 +122,12 @@ def test_max_replan_terminates_without_claiming_pass() -> None:
     assert result["verification_decision"] == "REPLAN"
     assert result["replan_count"] == 1
     assert result["trace"] == [
-        "planner",
+        "planner:initial",
+        "planner_validation:VALID",
         "executor",
         "verifier:REPLAN",
-        "planner",
+        "planner:scientific_replan",
+        "planner_validation:VALID",
         "executor",
         "verifier:REPLAN",
         "failure_finalizer:max_replans",

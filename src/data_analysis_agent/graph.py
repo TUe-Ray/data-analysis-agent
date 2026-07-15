@@ -17,11 +17,14 @@ from data_analysis_agent.nodes import (
     make_mechanical_repair_node,
     make_output_repair_node,
     make_planner_node,
+    make_planner_repair_node,
     make_verifier_node,
     max_replan_failure_node,
     mechanical_execution_failure_node,
     output_failure_node,
     output_validator_node,
+    planner_output_failure_node,
+    planner_validator_node,
     select_current_goal_node,
 )
 from data_analysis_agent.python_runner import LocalPythonRunner
@@ -68,6 +71,17 @@ def route_after_execution(
     return "mechanical_failure"
 
 
+def route_after_planner_validation(
+    state: AgentState,
+) -> Literal["select_current_goal", "planner_repair", "planner_output_failure"]:
+    """Route deterministic Planner schema failures to bounded structural repair."""
+    if state.get("planner_validation_error") is None:
+        return "select_current_goal"
+    if state.get("planner_repair_count", 0) < state.get("max_planner_repairs", 2):
+        return "planner_repair"
+    return "planner_output_failure"
+
+
 def route_after_output_validation(
     state: AgentState,
 ) -> Literal["end", "output_repair", "output_failure"]:
@@ -91,6 +105,8 @@ def build_graph(
     output_provider = output_provider or DeterministicFinalOutputProvider()
     workflow = StateGraph(AgentState)
     workflow.add_node("planner", make_planner_node(model))
+    workflow.add_node("planner_validator", planner_validator_node)
+    workflow.add_node("planner_repair", make_planner_repair_node(model))
     workflow.add_node("select_current_goal", select_current_goal_node)
     workflow.add_node("executor", make_executor_node(model, runner))
     workflow.add_node("mechanical_repair", make_mechanical_repair_node(model, runner))
@@ -102,11 +118,22 @@ def build_graph(
     workflow.add_node("output_validator", output_validator_node)
     workflow.add_node("output_repair", make_output_repair_node(output_provider))
     workflow.add_node("failure_finalizer", max_replan_failure_node)
+    workflow.add_node("planner_output_failure", planner_output_failure_node)
     workflow.add_node("mechanical_failure", mechanical_execution_failure_node)
     workflow.add_node("output_failure", output_failure_node)
 
     workflow.add_edge(START, "planner")
-    workflow.add_edge("planner", "select_current_goal")
+    workflow.add_edge("planner", "planner_validator")
+    workflow.add_conditional_edges(
+        "planner_validator",
+        route_after_planner_validation,
+        {
+            "select_current_goal": "select_current_goal",
+            "planner_repair": "planner_repair",
+            "planner_output_failure": "planner_output_failure",
+        },
+    )
+    workflow.add_edge("planner_repair", "planner_validator")
     workflow.add_edge("select_current_goal", "executor")
     workflow.add_conditional_edges(
         "executor",
@@ -148,6 +175,7 @@ def build_graph(
     )
     workflow.add_edge("output_repair", "output_validator")
     workflow.add_edge("failure_finalizer", END)
+    workflow.add_edge("planner_output_failure", END)
     workflow.add_edge("mechanical_failure", END)
     workflow.add_edge("output_failure", END)
     return workflow.compile()

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 DEFAULT_NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 DEFAULT_MAX_CODE_REPAIR_ATTEMPTS = 50
 DEFAULT_CODE_REPAIR_NO_PROGRESS_ATTEMPTS = 3
+DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS = 2
 
 
 class ConfigurationError(ValueError):
@@ -25,6 +26,7 @@ class Settings:
     nebius_model: str
     max_code_repair_attempts: int = DEFAULT_MAX_CODE_REPAIR_ATTEMPTS
     code_repair_no_progress_attempts: int = DEFAULT_CODE_REPAIR_NO_PROGRESS_ATTEMPTS
+    max_planner_repair_attempts: int = DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS
 
 
 def _positive_environment_int(name: str, default: int) -> int:
@@ -54,6 +56,13 @@ def code_repair_settings() -> tuple[int, int]:
     )
 
 
+def max_planner_repair_attempts() -> int:
+    """Return the bounded structural Planner-output repair limit."""
+    return _positive_environment_int(
+        "MAX_PLANNER_REPAIR_ATTEMPTS", DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS
+    )
+
+
 def load_settings(*, load_dotenv_file: bool = True) -> Settings:
     """Load Nebius settings, raising a clear error for missing required values."""
     if load_dotenv_file:
@@ -63,6 +72,7 @@ def load_settings(*, load_dotenv_file: bool = True) -> Settings:
     model = os.getenv("NEBIUS_MODEL")
     base_url = os.getenv("NEBIUS_BASE_URL") or DEFAULT_NEBIUS_BASE_URL
     max_code_repair_attempts, code_repair_no_progress_attempts = code_repair_settings()
+    planner_repair_attempts = max_planner_repair_attempts()
 
     missing = [
         name
@@ -81,4 +91,5 @@ def load_settings(*, load_dotenv_file: bool = True) -> Settings:
         nebius_model=model,
         max_code_repair_attempts=max_code_repair_attempts,
         code_repair_no_progress_attempts=code_repair_no_progress_attempts,
+        max_planner_repair_attempts=planner_repair_attempts,
     )

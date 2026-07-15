@@ -2,6 +2,7 @@ import pytest
 
 from data_analysis_agent.config import (
     DEFAULT_MAX_CODE_REPAIR_ATTEMPTS,
+    DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS,
     DEFAULT_NEBIUS_BASE_URL,
     ConfigurationError,
     load_settings,
@@ -54,6 +55,17 @@ def test_load_settings_defaults_mechanical_repair_limit(
     assert load_settings(load_dotenv_file=False).max_code_repair_attempts == (
         DEFAULT_MAX_CODE_REPAIR_ATTEMPTS
     )
+
+
+def test_load_settings_reads_planner_repair_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
+    monkeypatch.setenv("NEBIUS_MODEL", "test-model")
+    monkeypatch.setenv("MAX_PLANNER_REPAIR_ATTEMPTS", "4")
+
+    assert load_settings(load_dotenv_file=False).max_planner_repair_attempts == 4
+    assert DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS == 2
 
 
 def test_load_settings_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,7 +39,8 @@ the model you want to use. `NEBIUS_BASE_URL` defaults to
 `https://api.tokenfactory.nebius.com/v1/` and can be overridden when needed.
 `MAX_CODE_REPAIR_ATTEMPTS` controls bounded mechanical generated-code repairs
 (default `50`); `CODE_REPAIR_NO_PROGRESS_ATTEMPTS` controls the repeated-error
-early-stop threshold (default `3`).
+early-stop threshold (default `3`). `MAX_PLANNER_REPAIR_ATTEMPTS` controls
+bounded structural Planner-response repairs (default `2`).
 Never commit `.env` or its API key.
 
 ## Commands

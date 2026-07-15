@@ -16,6 +16,14 @@ algorithm parameters unless the user explicitly requires a parameter. On replan,
 revise high-level goals using the factual failure and verifier feedback. Do not
 explain hidden reasoning."""
 
+PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid scientific
+HighLevelPlan response. Return exactly one JSON object matching the required
+HighLevelPlan schema. Preserve the original scientific task, required coverage,
+and valid goals whenever possible. Use unique goal_id values. Each dependency
+must name an existing goal_id that appears earlier in the goals list. Do not
+calculate results or add implementation details, code, tools, or file paths. Do
+not remove required task outputs merely to make the structure valid."""
+
 EXECUTOR_SYSTEM_PROMPT = """You are the tactical Executor for one scientific goal.
 Choose a trusted built-in capability when it directly satisfies the goal; otherwise
 choose generated_python. Do not change the goal, remove outputs or constraints,
@@ -107,6 +115,36 @@ def build_planner_messages(
     return [
         {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
         {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+
+def build_planner_repair_messages(
+    *,
+    question: str,
+    invalid_response: str,
+    validation_error: str,
+) -> list[dict[str, str]]:
+    """Build a compact structural-only repair request for Planner output."""
+    schema_summary = (
+        '{"scientific_objective":"string","goals":[{"goal_id":"string",'
+        '"objective":"string","required_outputs":["string"],'
+        '"constraints":["string"],"success_criteria":["string"],'
+        '"depends_on":["earlier_goal_id"]}]}'
+    )
+    return [
+        {"role": "system", "content": PLANNER_REPAIR_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Original user question:\n{question}\n\n"
+                f"Invalid Planner response:\n{invalid_response}\n\n"
+                f"Deterministic validation error:\n{validation_error}\n\n"
+                f"HighLevelPlan JSON schema summary:\n{schema_summary}\n\n"
+                "Dependency rule: every depends_on item must exactly match an "
+                "existing earlier goal_id; forward and missing dependencies are "
+                "invalid."
+            ),
+        },
     ]
 
 

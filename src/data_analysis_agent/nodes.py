@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from data_analysis_agent.config import code_repair_settings
+from data_analysis_agent.config import code_repair_settings, max_planner_repair_attempts
 from data_analysis_agent.final_output import (
     FinalGenerationRequest,
     FinalOutputProvider,
@@ -20,6 +20,7 @@ from data_analysis_agent.prompts import (
     VERIFIER_REPAIR_PROMPT,
     build_executor_messages,
     build_planner_messages,
+    build_planner_repair_messages,
     build_python_generation_messages,
     build_python_repair_messages,
     build_verifier_messages,
@@ -64,7 +65,7 @@ def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
     try:
         plan = HighLevelPlan.model_validate_json(raw_output)
     except ValidationError as error:
-        if raw_output.lstrip().startswith("{"):
+        if not raw_output.lstrip().startswith("1."):
             raise PlannerOutputError(
                 "Planner returned JSON that does not match HighLevelPlan"
             ) from error
@@ -124,8 +125,43 @@ def _preserve_completed_results(
     ]
 
 
+def _planner_response_update(
+    *,
+    state: AgentState,
+    raw_response: str,
+    planner_mode: str,
+    planner_repair_count: int,
+    run_directory: str,
+) -> dict[str, object]:
+    """Persist raw Planner output before deterministic validation can reject it."""
+    history = list(state.get("planner_response_history", []))
+    version = len(history) + 1
+    directory = Path(run_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    raw_path = directory / f"planner_response_v{version}.json"
+    raw_path.write_text(raw_response, encoding="utf-8")
+    history.append(
+        {
+            "mode": planner_mode,
+            "version": version,
+            "raw_response": raw_response,
+            "raw_response_path": str(raw_path),
+            "planner_repair_count": planner_repair_count,
+            "scientific_replan_count": state.get("replan_count", 0),
+        }
+    )
+    return {
+        "plan": raw_response,
+        "planner_raw_response": raw_response,
+        "planner_raw_response_path": str(raw_path),
+        "planner_response_history": history,
+        "planner_mode": planner_mode,
+        "planner_repair_count": planner_repair_count,
+    }
+
+
 def make_planner_node(model: RoleModel) -> Node:
-    """Create a Planner that returns global, implementation-agnostic goals."""
+    """Create a Planner that persists raw output before structural validation."""
 
     def planner(state: AgentState) -> dict[str, object]:
         is_replan = state.get("verification_decision") == "REPLAN"
@@ -145,32 +181,13 @@ def make_planner_node(model: RoleModel) -> Node:
                 state.get("current_goal_result") if is_replan else None
             ),
         )
-        raw_plan = model.generate(role="planner", messages=messages)
-        plan, structured = _validate_plan(raw_plan)
-        completed = (
-            _preserve_completed_results(state=state, revised_plan=plan)
-            if is_replan and structured
-            else ([] if is_replan else list(state.get("completed_goal_results", [])))
-        )
-        completed_ids = {str(item.get("goal_id")) for item in completed}
-        next_index = next(
-            (
-                index
-                for index, goal in enumerate(plan.goals)
-                if goal.goal_id not in completed_ids
-            ),
-            len(plan.goals),
-        )
         run_id = state.get("run_id") or uuid.uuid4().hex[:12]
         run_directory = state.get("run_directory") or str(
             Path.cwd() / "runs" / f"run_{run_id}"
         )
+        raw_plan = model.generate(role="planner", messages=messages)
+        mode = "scientific_replan" if is_replan else "initial"
         return {
-            "plan": raw_plan,
-            "high_level_plan": plan.model_dump(mode="json"),
-            "structured_plan": structured,
-            "completed_goal_results": completed,
-            "current_goal_index": next_index,
             "replan_count": replan_count,
             "max_replans": state.get("max_replans", 1),
             "run_id": run_id,
@@ -178,10 +195,145 @@ def make_planner_node(model: RoleModel) -> Node:
             "trusted_tool_calls": state.get("trusted_tool_calls", 0),
             "generated_script_count": state.get("generated_script_count", 0),
             "code_repair_count": state.get("code_repair_count", 0),
-            "trace": _trace(state, "planner"),
+            "max_planner_repairs": state.get(
+                "max_planner_repairs", max_planner_repair_attempts()
+            ),
+            "planner_validation_error": None,
+            "planner_validation_history": list(
+                state.get("planner_validation_history", [])
+            ),
+            **_planner_response_update(
+                state=state,
+                raw_response=raw_plan,
+                planner_mode=mode,
+                planner_repair_count=0,
+                run_directory=run_directory,
+            ),
+            "trace": _trace(state, f"planner:{mode}"),
         }
 
     return planner
+
+
+def planner_validator_node(state: AgentState) -> dict[str, object]:
+    """Deterministically validate persisted Planner output and expose routing facts."""
+    raw_response = state["planner_raw_response"]
+    latest = state["planner_response_history"][-1]
+    version = int(latest["version"])
+    validation_path = (
+        Path(state["run_directory"]) / f"planner_validation_v{version}.json"
+    )
+    mode = state.get("planner_mode", "initial")
+    try:
+        plan, structured = _validate_plan(raw_response)
+    except PlannerOutputError as error:
+        validation_error = f"{type(error).__name__}: {error}"
+        route = (
+            "planner_repair"
+            if state.get("planner_repair_count", 0)
+            < state.get("max_planner_repairs", max_planner_repair_attempts())
+            else "planner_output_failure"
+        )
+        validation = {
+            "valid": False,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "attempt": version,
+        }
+        validation_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+        record = {
+            "mode": mode,
+            "version": version,
+            "raw_response_path": state["planner_raw_response_path"],
+            "validation_path": str(validation_path),
+            "valid": False,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "planner_repair_count": state.get("planner_repair_count", 0),
+            "scientific_replan_count": state.get("replan_count", 0),
+            "route": route,
+        }
+        return {
+            "planner_validation_error": validation_error,
+            "planner_validation_history": [
+                *state.get("planner_validation_history", []),
+                record,
+            ],
+            "trace": _trace(state, "planner_validation:INVALID"),
+        }
+    validation_path.write_text(
+        json.dumps(
+            {"valid": True, "error_type": None, "error": None, "attempt": version},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    is_replan = mode == "scientific_replan"
+    completed = (
+        _preserve_completed_results(state=state, revised_plan=plan)
+        if is_replan and structured
+        else ([] if is_replan else list(state.get("completed_goal_results", [])))
+    )
+    completed_ids = {str(item.get("goal_id")) for item in completed}
+    next_index = next(
+        (
+            index
+            for index, goal in enumerate(plan.goals)
+            if goal.goal_id not in completed_ids
+        ),
+        len(plan.goals),
+    )
+    record = {
+        "mode": mode,
+        "version": version,
+        "raw_response_path": state["planner_raw_response_path"],
+        "validation_path": str(validation_path),
+        "valid": True,
+        "error_type": None,
+        "error": None,
+        "planner_repair_count": state.get("planner_repair_count", 0),
+        "scientific_replan_count": state.get("replan_count", 0),
+        "route": "select_current_goal",
+    }
+    return {
+        "high_level_plan": plan.model_dump(mode="json"),
+        "structured_plan": structured,
+        "completed_goal_results": completed,
+        "current_goal_index": next_index,
+        "planner_validation_error": None,
+        "planner_validation_history": [
+            *state.get("planner_validation_history", []),
+            record,
+        ],
+        "trace": _trace(state, "planner_validation:VALID"),
+    }
+
+
+def make_planner_repair_node(model: RoleModel) -> Node:
+    """Repair only Planner JSON/schema structure without scientific replanning."""
+
+    def planner_repair(state: AgentState) -> dict[str, object]:
+        attempt = state.get("planner_repair_count", 0) + 1
+        raw_response = model.generate(
+            role="planner",
+            messages=build_planner_repair_messages(
+                question=state["question"],
+                invalid_response=state["planner_raw_response"],
+                validation_error=state.get("planner_validation_error", "Unknown error"),
+            ),
+        )
+        return {
+            **_planner_response_update(
+                state=state,
+                raw_response=raw_response,
+                planner_mode=state.get("planner_mode", "initial"),
+                planner_repair_count=attempt,
+                run_directory=state["run_directory"],
+            ),
+            "trace": _trace(state, f"planner_repair:attempt_{attempt}"),
+        }
+
+    return planner_repair
 
 
 def select_current_goal_node(state: AgentState) -> dict[str, object]:
@@ -841,6 +993,40 @@ def max_replan_failure_node(state: AgentState) -> dict[str, object]:
         "status": "stopped_after_max_replans",
         "final_status": "stopped_after_max_replans",
         "trace": _trace(state, "failure_finalizer:max_replans"),
+    }
+
+
+def planner_output_failure_node(state: AgentState) -> dict[str, object]:
+    """Finalize exhausted Planner structural repair without entering execution."""
+    calls = len(state.get("planner_response_history", []))
+    repairs = state.get("planner_repair_count", 0)
+    error = state.get("planner_validation_error", "Unknown Planner validation error")
+    raw_path = state.get("planner_raw_response_path", "not available")
+    executor_invoked = bool(state.get("current_strategy"))
+    verifier_invoked = bool(state.get("iteration_history"))
+    detail = (
+        f"planner_calls={calls}; planner_repair_attempts={repairs}; "
+        f"final_validation_error={error}; raw_response_path={raw_path}; "
+        f"scientific_replan_count={state.get('replan_count', 0)}; "
+        f"executor_invoked={str(executor_invoked).lower()}; "
+        f"verifier_invoked={str(verifier_invoked).lower()}"
+    )
+    failure = FinalFailureAnswer(
+        status="planner_output_failed",
+        answer=None,
+        key_results={},
+        limitations=[
+            "Planner output did not satisfy the deterministic HighLevelPlan "
+            "contract after bounded structural repair."
+        ],
+        error=detail,
+    )
+    return {
+        "final_answer": failure.model_dump_json(indent=2),
+        "validated_final_answer": failure.model_dump(mode="json"),
+        "status": "planner_output_failed",
+        "final_status": "planner_output_failed",
+        "trace": _trace(state, "failure_finalizer:planner_output"),
     }
 
 

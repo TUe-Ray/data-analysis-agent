@@ -46,6 +46,21 @@ class CodeExecutionRecord(TypedDict, total=False):
     scientific_replan_count: int
 
 
+class PlannerValidationRecord(TypedDict, total=False):
+    """One persisted raw Planner response and deterministic validation result."""
+
+    mode: Literal["initial", "scientific_replan"]
+    version: int
+    raw_response_path: str
+    validation_path: str
+    valid: bool
+    error_type: str | None
+    error: str | None
+    planner_repair_count: int
+    scientific_replan_count: int
+    route: str
+
+
 class AgentState(TypedDict, total=False):
     """Values passed between the V0 Planner, Executor, and Verifier nodes."""
 
@@ -96,6 +111,14 @@ class AgentState(TypedDict, total=False):
     verification_feedback: str
     replan_count: int
     max_replans: int
+    planner_mode: Literal["initial", "scientific_replan"]
+    planner_repair_count: int
+    max_planner_repairs: int
+    planner_validation_error: str | None
+    planner_raw_response: str
+    planner_response_history: list[dict[str, JsonValue]]
+    planner_validation_history: list[PlannerValidationRecord]
+    planner_raw_response_path: str
     status: str
     final_status: str
     final_answer: str

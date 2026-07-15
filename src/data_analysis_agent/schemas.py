@@ -96,6 +96,7 @@ class FinalFailureAnswer(BaseModel):
         "output_validation_failed",
         "python_policy_failure",
         "mechanical_execution_failed",
+        "planner_output_failed",
     ]
     answer: str | None
     key_results: dict[str, JsonValue]
