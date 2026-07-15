@@ -250,7 +250,12 @@ def _model_observer(progress: ProgressCallback | None):
         }
         label = labels[role]
         if phase == "start":
-            _progress(progress, "activity", message=f"{label} — calling model...")
+            message = (
+                "Planner — started; generating plan steps..."
+                if role == "planner"
+                else f"{label} — calling model..."
+            )
+            _progress(progress, "activity", message=message)
         elif error:
             _progress(
                 progress,
@@ -258,10 +263,15 @@ def _model_observer(progress: ProgressCallback | None):
                 error=f"{label} — failed after {elapsed:.1f}s: {error}",
             )
         else:
+            message = (
+                f"Planner — plan generated in {elapsed:.1f}s"
+                if role == "planner"
+                else f"{label} — completed in {elapsed:.1f}s"
+            )
             _progress(
                 progress,
                 "activity",
-                message=f"{label} — completed in {elapsed:.1f}s",
+                message=message,
             )
 
     return observe

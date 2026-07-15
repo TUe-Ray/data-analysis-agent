@@ -9,7 +9,7 @@ from data_analysis_agent.benchmark import (
     _offline_model_factory,
     run_benchmark,
 )
-from data_analysis_agent.benchmark_approaches import run_agent
+from data_analysis_agent.benchmark_approaches import _model_observer, run_agent
 from data_analysis_agent.benchmark_progress import BenchmarkProgressRenderer
 from data_analysis_agent.benchmark_tasks import load_benchmark_task, stage_public_task
 from data_analysis_agent.benchmark_types import BenchmarkConfig
@@ -49,6 +49,20 @@ def _three_goal_plan(renderer: BenchmarkProgressRenderer) -> None:
             ],
         }
     )
+
+
+def test_planner_progress_announces_plan_generation_before_steps() -> None:
+    events: list[dict[str, str]] = []
+    observer = _model_observer(lambda event: events.append(event))
+
+    assert observer is not None
+    observer("start", "planner", 1, 0.0, None)
+    observer("end", "planner", 1, 2.5, None)
+
+    assert events == [
+        {"type": "activity", "message": "Planner — started; generating plan steps..."},
+        {"type": "activity", "message": "Planner — plan generated in 2.5s"},
+    ]
 
 
 def test_noninteractive_progress_shows_goals_after_verifier_approval(
