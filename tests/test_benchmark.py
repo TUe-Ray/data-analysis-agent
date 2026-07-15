@@ -9,6 +9,7 @@ from data_analysis_agent.benchmark import (
     _offline_model_factory,
     benchmark_scope_label,
     build_benchmark_run_id,
+    build_parser,
     format_benchmark_summary,
     run_benchmark,
 )
@@ -46,6 +47,45 @@ def config() -> BenchmarkConfig:
         task_ids=["successive_difference_smoke"],
         approaches=["direct_answer", "one_shot_code", "agent"],
     )
+
+
+def test_benchmark_parser_accepts_max_replans() -> None:
+    args = build_parser().parse_args(
+        ["--task", "successive_difference_smoke", "--max-replans", "5"]
+    )
+
+    assert args.max_replans == 5
+
+
+def test_agent_uses_configured_max_replans(task, tmp_path: Path) -> None:
+    public = stage_public_task(task.public, tmp_path / "attempt")
+    config = BenchmarkConfig(
+        model="offline-test-model",
+        task_ids=["successive_difference_smoke"],
+        approaches=["agent"],
+        max_replans=5,
+    )
+    result = {
+        "question": public.prompt,
+        "file_paths": [Path(path).name for path in public.data_files],
+        "input_context": "",
+        "trace": [],
+        "status": "completed",
+        "execution_result": "{}",
+        "iteration_history": [],
+    }
+    with patch("data_analysis_agent.benchmark_approaches.build_graph") as build_graph:
+        build_graph.return_value.invoke.return_value = result
+        outcome = run_agent(
+            public=public,
+            model=ScriptedRoleModel({}),
+            run_directory=tmp_path / "attempt",
+            config=config,
+        )
+
+    initial_state = build_graph.return_value.invoke.call_args.args[0]
+    assert outcome.status == "completed"
+    assert initial_state["max_replans"] == 5
 
 
 def _final(value: float) -> str:

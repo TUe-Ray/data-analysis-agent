@@ -74,6 +74,7 @@ class BenchmarkConfig(BaseModel):
     max_output_tokens: int = Field(default=4096, gt=0)
     timeout_seconds: float = Field(default=30.0, gt=0)
     direct_answer_max_input_chars: int = Field(default=500_000, gt=0)
+    max_replans: int = Field(default=1, ge=0)
     repeats: int = Field(default=1, gt=0)
     task_ids: list[str]
     approaches: list[Approach]

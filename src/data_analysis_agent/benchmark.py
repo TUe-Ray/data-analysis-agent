@@ -586,6 +586,16 @@ def _parse_approaches(value: str) -> list[Approach]:
     return values  # type: ignore[return-value]
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", action="append", required=True, dest="task_ids")
@@ -600,6 +610,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float)
     parser.add_argument("--max-output-tokens", type=int, default=4096)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--max-replans",
+        type=_non_negative_int,
+        default=1,
+        help="Maximum scientific replans allowed for each agent attempt.",
+    )
     parser.add_argument(
         "--stop-after-goals",
         type=int,
@@ -627,6 +643,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             top_p=args.top_p,
             max_output_tokens=args.max_output_tokens,
             timeout_seconds=args.timeout,
+            max_replans=args.max_replans,
             repeats=args.repeats,
             task_ids=args.task_ids,
             approaches=args.approaches,
