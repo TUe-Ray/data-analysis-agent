@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from data_analysis_agent.config import code_repair_settings
 from data_analysis_agent.final_output import (
     FinalGenerationRequest,
     FinalOutputProvider,
@@ -198,7 +199,16 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         raise RuntimeError(
             f"Goal {goal.goal_id!r} has incomplete dependencies: {', '.join(missing)}"
         )
-    return {"current_goal": goal.model_dump(mode="json")}
+    return {
+        "current_goal": goal.model_dump(mode="json"),
+        # A new goal (including a replanned one) starts a fresh mechanical budget.
+        "code_repair_attempts_for_current_goal": 0,
+        "code_repair_no_progress_count": 0,
+        "code_repair_no_progress": False,
+        "generated_execution_history": [],
+        "current_generated_code": "",
+        "execution_failure_category": None,
+    }
 
 
 def _staged_paths(state: AgentState) -> list[Path]:
@@ -240,13 +250,26 @@ def _extract_code(raw: str) -> str:
     return stripped + "\n"
 
 
-def _generated_result(
+def _safe_code(raw: str) -> str:
+    """Keep malformed model output inside the mechanical repair loop."""
+    try:
+        return _extract_code(raw)
+    except ExecutorOutputError:
+        return raw.strip() + "\n" if raw.strip() else "\n"
+
+
+def _generated_execution_update(
     *,
     state: AgentState,
-    model: RoleModel,
     strategy: ExecutionStrategy,
     runner: LocalPythonRunner,
-) -> tuple[GoalResult, str, int, int]:
+    code: str,
+    source_changed: bool,
+    repair_attempts: int,
+    no_progress_count: int,
+    no_progress: bool,
+) -> dict[str, object]:
+    """Run one version and expose only typed execution facts to graph routing."""
     goal = IntermediateGoal.model_validate(state["current_goal"])
     goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
     staged_paths = _staged_paths(state)
@@ -255,54 +278,22 @@ def _generated_result(
         for path in goal_directory.glob("generated_code_v*.py")
         if path.stem.rsplit("v", 1)[-1].isdigit()
     ]
-    first_version = max(existing_versions, default=0) + 1
-    source_messages = build_python_generation_messages(
-        current_goal=goal.model_dump(mode="json"),
-        staged_file_paths=_staged_display_paths(state),
-        completed_goal_results=list(state.get("completed_goal_results", [])),
-        goal_directory=str(goal_directory),
+    version = max(existing_versions, default=0) + 1
+    final = runner.run(
+        code=code,
+        goal_directory=goal_directory,
+        allowed_files=staged_paths,
+        version=version,
+        working_directory=(
+            Path(state["execution_working_directory"])
+            if state.get("execution_working_directory")
+            else None
+        ),
     )
-    code_v1 = _extract_code(model.generate(role="executor", messages=source_messages))
-    executions: list[PythonExecutionResult] = [
-        runner.run(
-            code=code_v1,
-            goal_directory=goal_directory,
-            allowed_files=staged_paths,
-            version=first_version,
-            working_directory=(
-                Path(state["execution_working_directory"])
-                if state.get("execution_working_directory")
-                else None
-            ),
-        )
-    ]
-    repair_count = 0
-    if not executions[0].success:
-        repair_messages = build_python_repair_messages(
-            current_goal=goal.model_dump(mode="json"),
-            code=code_v1,
-            stdout=executions[0].stdout,
-            stderr=executions[0].stderr,
-            error=executions[0].error,
-            staged_file_paths=_staged_display_paths(state),
-        )
-        code_v2 = _extract_code(
-            model.generate(role="executor", messages=repair_messages)
-        )
-        executions.append(
-            runner.run(
-                code=code_v2,
-                goal_directory=goal_directory,
-                allowed_files=staged_paths,
-                version=first_version + 1,
-                working_directory=(
-                    Path(state["execution_working_directory"])
-                    if state.get("execution_working_directory")
-                    else None
-                ),
-            )
-        )
-        repair_count = 1
+    executions = [
+        PythonExecutionResult.model_validate(item)
+        for item in state.get("generated_execution_history", [])
+    ] + [final]
     metadata_path = write_execution_metadata(
         goal_directory=goal_directory,
         run_id=state["run_id"],
@@ -310,7 +301,6 @@ def _generated_result(
         executions=executions,
         strategy_reason=strategy.concise_reason,
     )
-    final = executions[-1]
     artifact_paths = list(
         dict.fromkeys(
             [path for execution in executions for path in execution.artifact_paths]
@@ -335,19 +325,70 @@ def _generated_result(
         "exit_code": final.exit_code,
         "error": final.error,
         "duration_seconds": final.duration_seconds,
-        "repair_required": repair_count == 1,
+        "repair_required": repair_attempts > 0,
         "timed_out": final.timed_out,
+        "policy_validated": final.policy_validated,
+        "parsed_result": final.parsed_result,
+        "failure_category": final.failure_category,
         "artifact_count": saved_artifact_count,
         "artifact_directory": str(goal_directory),
         "latest_stderr_path": str(latest_stderr_path),
         "artifact_paths": artifact_paths,
     }
-    return (
-        result,
-        json.dumps(factual, ensure_ascii=False),
-        len(executions),
-        repair_count,
+    max_repairs, max_no_progress = code_repair_settings()
+    repair_limit = state.get("max_code_repair_attempts", max_repairs)
+    no_progress_limit = state.get(
+        "max_code_repair_no_progress_attempts", max_no_progress
     )
+    if final.success:
+        next_route = "verifier"
+    elif no_progress:
+        next_route = "mechanical_failure"
+    elif repair_attempts < repair_limit:
+        next_route = "mechanical_repair"
+    else:
+        next_route = "mechanical_failure"
+    record = {
+        "goal_id": goal.goal_id,
+        "version": final.version,
+        "attempt": repair_attempts,
+        "failure_category": final.failure_category,
+        "exit_code": final.exit_code,
+        "timed_out": final.timed_out,
+        "policy_validated": final.policy_validated,
+        "parsed_result": final.parsed_result,
+        "error": final.error,
+        "source_changed": source_changed,
+        "route": next_route,
+        "code_repair_attempts_for_current_goal": repair_attempts,
+        "scientific_replan_count": state.get("replan_count", 0),
+    }
+    trace_event = (
+        "code_execution:success"
+        if final.success
+        else f"code_execution:{final.failure_category}"
+    )
+    return {
+        "current_goal_result": result.model_dump(mode="json"),
+        "execution_result": json.dumps(factual, ensure_ascii=False),
+        "current_generated_code": code,
+        "generated_execution_history": [
+            item.model_dump(mode="json") for item in executions
+        ],
+        "code_execution_history": [*state.get("code_execution_history", []), record],
+        "execution_failure_category": final.failure_category,
+        "failure_category": final.failure_category,
+        "policy_failure_reason": (
+            final.error if final.failure_category == "policy_error" else None
+        ),
+        "generated_script_count": state.get("generated_script_count", 0) + 1,
+        "code_repair_attempts_for_current_goal": repair_attempts,
+        "max_code_repair_attempts": repair_limit,
+        "code_repair_no_progress_count": no_progress_count,
+        "max_code_repair_no_progress_attempts": no_progress_limit,
+        "code_repair_no_progress": no_progress,
+        "trace": _trace(state, trace_event),
+    }
 
 
 def make_executor_node(
@@ -443,15 +484,38 @@ def make_executor_node(
             repair_increment = 0
             tool_increment = 1
         else:
-            goal_result, execution_result, script_increment, repair_increment = (
-                _generated_result(
-                    state=state,
-                    model=model,
-                    strategy=strategy,
-                    runner=runner,
-                )
+            goal = IntermediateGoal.model_validate(state["current_goal"])
+            goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
+            source_messages = build_python_generation_messages(
+                current_goal=goal.model_dump(mode="json"),
+                staged_file_paths=_staged_display_paths(state),
+                completed_goal_results=list(state.get("completed_goal_results", [])),
+                goal_directory=str(goal_directory),
             )
-            tool_increment = 0
+            generated = _generated_execution_update(
+                state={**state, "trace": _trace(state, "executor")},
+                strategy=strategy,
+                runner=runner,
+                code=_safe_code(
+                    model.generate(role="executor", messages=source_messages)
+                ),
+                source_changed=True,
+                repair_attempts=0,
+                no_progress_count=0,
+                no_progress=False,
+            )
+            return {
+                "capability_catalog": catalog,
+                "current_strategy": strategy.model_dump(mode="json"),
+                "trusted_tool_calls": state.get("trusted_tool_calls", 0),
+                "code_repair_count": state.get("code_repair_count", 0),
+                "executor_warnings": [
+                    *state.get("executor_warnings", []),
+                    *normalization_warnings,
+                ],
+                **generated,
+            }
+
         policy_failure_reason = (
             goal_result.error
             if goal_result.error and goal_result.error.startswith("PythonPolicyError:")
@@ -475,6 +539,67 @@ def make_executor_node(
         }
 
     return executor
+
+
+def make_mechanical_repair_node(
+    model: RoleModel, runner: LocalPythonRunner | None = None
+) -> Node:
+    """Repair a failed implementation without changing the approved goal."""
+    runner = runner or LocalPythonRunner()
+
+    def mechanical_repair(state: AgentState) -> dict[str, object]:
+        goal = IntermediateGoal.model_validate(state["current_goal"])
+        previous = PythonExecutionResult.model_validate(
+            state["generated_execution_history"][-1]
+        )
+        attempt = state.get("code_repair_attempts_for_current_goal", 0) + 1
+        history = state.get("code_execution_history", [])[-3:]
+        messages = build_python_repair_messages(
+            current_goal=goal.model_dump(mode="json"),
+            code=state["current_generated_code"],
+            failure_category=previous.failure_category or "runtime_error",
+            stdout=previous.stdout,
+            stderr=previous.stderr,
+            error=previous.error,
+            staged_file_paths=_staged_display_paths(state),
+            goal_directory=str(Path(state["run_directory"]) / "goals" / goal.goal_id),
+            repair_history=history,
+        )
+        code = _safe_code(model.generate(role="executor", messages=messages))
+        source_changed = code != state.get("current_generated_code", "")
+        same_error = (
+            len(history) > 1
+            and history[-2].get("failure_category") == previous.failure_category
+            and history[-2].get("error") == previous.error
+        )
+        no_progress_count = (
+            state.get("code_repair_no_progress_count", 0) + 1
+            if not source_changed or same_error
+            else 0
+        )
+        _, default_no_progress = code_repair_settings()
+        no_progress_limit = state.get(
+            "max_code_repair_no_progress_attempts", default_no_progress
+        )
+        updates = _generated_execution_update(
+            state={
+                **state,
+                "trace": _trace(state, f"mechanical_repair:attempt_{attempt}"),
+            },
+            strategy=ExecutionStrategy.model_validate(state["current_strategy"]),
+            runner=runner,
+            code=code,
+            source_changed=source_changed,
+            repair_attempts=attempt,
+            no_progress_count=no_progress_count,
+            no_progress=no_progress_count >= no_progress_limit,
+        )
+        return {
+            **updates,
+            "code_repair_count": state.get("code_repair_count", 0) + 1,
+        }
+
+    return mechanical_repair
 
 
 def make_verifier_node(model: RoleModel) -> Node:
@@ -556,6 +681,11 @@ def make_verifier_node(model: RoleModel) -> Node:
                 updates: dict[str, object] = {
                     "verification_decision": output.decision,
                     "verification_feedback": output.feedback,
+                    "failure_category": (
+                        "scientific_verification_failure"
+                        if output.decision == "REPLAN"
+                        else None
+                    ),
                     "trace": _trace(state, f"verifier:{output.decision}"),
                     "iteration_history": [
                         *state.get("iteration_history", []),
@@ -733,6 +863,40 @@ def python_policy_failure_node(state: AgentState) -> dict[str, object]:
         "status": "python_policy_failure",
         "final_status": "python_policy_failure",
         "trace": _trace(state, "failure_finalizer:python_policy"),
+    }
+
+
+def mechanical_execution_failure_node(state: AgentState) -> dict[str, object]:
+    """Finalize exhausted generated-code repair without scientific replanning."""
+    goal = state.get("current_goal", {}).get("goal_id", "unknown_goal")
+    category = state.get("execution_failure_category", "runtime_error")
+    error = (
+        GoalResult.model_validate(state["current_goal_result"]).error or "Unknown error"
+    )
+    attempts = state.get("code_repair_attempts_for_current_goal", 0)
+    no_progress = state.get("code_repair_no_progress", False)
+    reason = "mechanical_repair_no_progress" if no_progress else "code_repair_exhausted"
+    detail = (
+        f"{reason}; goal_id={goal}; repair_attempts={attempts}; "
+        f"final_failure_category={category}; no_progress_termination={no_progress}; "
+        f"scientific_replan_count={state.get('replan_count', 0)}; error={error}"
+    )
+    failure = FinalFailureAnswer(
+        status="mechanical_execution_failed",
+        answer=None,
+        key_results={},
+        limitations=[
+            "Generated code never produced a valid executor-level result, so it was "
+            "not evaluated by the scientific Verifier."
+        ],
+        error=detail,
+    )
+    return {
+        "final_answer": failure.model_dump_json(indent=2),
+        "validated_final_answer": failure.model_dump(mode="json"),
+        "status": "mechanical_execution_failed",
+        "final_status": "mechanical_execution_failed",
+        "trace": _trace(state, f"failure_finalizer:{reason}"),
     }
 
 

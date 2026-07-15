@@ -128,6 +128,12 @@ def _write_workflow_log(
         json.dumps(result.get("completed_goal_results", []), indent=2),
         "Executor warnings:",
         json.dumps(result.get("executor_warnings", []), indent=2),
+        "Generated-code execution history:",
+        json.dumps(result.get("code_execution_history", []), indent=2),
+        "Mechanical repair attempts for current goal:",
+        str(result.get("code_repair_attempts_for_current_goal", 0)),
+        "Scientific replan count:",
+        str(result.get("replan_count", 0)),
         f"Run artifact directory: {result.get('run_directory', 'none')}",
         "",
     ]

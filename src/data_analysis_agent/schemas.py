@@ -95,6 +95,7 @@ class FinalFailureAnswer(BaseModel):
         "stopped_after_max_replans",
         "output_validation_failed",
         "python_policy_failure",
+        "mechanical_execution_failed",
     ]
     answer: str | None
     key_results: dict[str, JsonValue]

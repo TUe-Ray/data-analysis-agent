@@ -1,6 +1,7 @@
 import pytest
 
 from data_analysis_agent.config import (
+    DEFAULT_MAX_CODE_REPAIR_ATTEMPTS,
     DEFAULT_NEBIUS_BASE_URL,
     ConfigurationError,
     load_settings,
@@ -27,6 +28,32 @@ def test_load_settings_reads_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.nebius_api_key == "test-key"
     assert settings.nebius_base_url == "https://example.test/v1/"
     assert settings.nebius_model == "test-model"
+
+
+def test_load_settings_reads_mechanical_repair_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
+    monkeypatch.setenv("NEBIUS_MODEL", "test-model")
+    monkeypatch.setenv("MAX_CODE_REPAIR_ATTEMPTS", "7")
+    monkeypatch.setenv("CODE_REPAIR_NO_PROGRESS_ATTEMPTS", "2")
+
+    settings = load_settings(load_dotenv_file=False)
+
+    assert settings.max_code_repair_attempts == 7
+    assert settings.code_repair_no_progress_attempts == 2
+
+
+def test_load_settings_defaults_mechanical_repair_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
+    monkeypatch.setenv("NEBIUS_MODEL", "test-model")
+    monkeypatch.delenv("MAX_CODE_REPAIR_ATTEMPTS", raising=False)
+
+    assert load_settings(load_dotenv_file=False).max_code_repair_attempts == (
+        DEFAULT_MAX_CODE_REPAIR_ATTEMPTS
+    )
 
 
 def test_load_settings_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

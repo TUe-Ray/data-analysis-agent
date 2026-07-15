@@ -14,13 +14,14 @@ from data_analysis_agent.models import RoleModel
 from data_analysis_agent.nodes import (
     make_executor_node,
     make_final_answer_generator_node,
+    make_mechanical_repair_node,
     make_output_repair_node,
     make_planner_node,
     make_verifier_node,
     max_replan_failure_node,
+    mechanical_execution_failure_node,
     output_failure_node,
     output_validator_node,
-    python_policy_failure_node,
     select_current_goal_node,
 )
 from data_analysis_agent.python_runner import LocalPythonRunner
@@ -48,9 +49,23 @@ def route_after_verification(
     raise RuntimeError("Verifier did not provide a routing decision")
 
 
-def route_after_execution(state: AgentState) -> Literal["verifier", "policy_failure"]:
-    """Keep local AST-policy blocks out of scientific verification and replanning."""
-    return "policy_failure" if state.get("policy_failure_reason") else "verifier"
+def route_after_execution(
+    state: AgentState,
+) -> Literal["verifier", "mechanical_repair", "mechanical_failure"]:
+    """Only successful generated executions may reach scientific verification."""
+    strategy = state.get("current_strategy", {}).get("strategy")
+    if strategy != "generated_python":
+        return "verifier"
+    result = state.get("current_goal_result")
+    if result and result.get("success"):
+        return "verifier"
+    if state.get("code_repair_no_progress"):
+        return "mechanical_failure"
+    if state.get("code_repair_attempts_for_current_goal", 0) < state.get(
+        "max_code_repair_attempts", 50
+    ):
+        return "mechanical_repair"
+    return "mechanical_failure"
 
 
 def route_after_output_validation(
@@ -78,6 +93,7 @@ def build_graph(
     workflow.add_node("planner", make_planner_node(model))
     workflow.add_node("select_current_goal", select_current_goal_node)
     workflow.add_node("executor", make_executor_node(model, runner))
+    workflow.add_node("mechanical_repair", make_mechanical_repair_node(model, runner))
     workflow.add_node("verifier", make_verifier_node(model))
     workflow.add_node(
         "final_answer_generator",
@@ -86,7 +102,7 @@ def build_graph(
     workflow.add_node("output_validator", output_validator_node)
     workflow.add_node("output_repair", make_output_repair_node(output_provider))
     workflow.add_node("failure_finalizer", max_replan_failure_node)
-    workflow.add_node("policy_failure", python_policy_failure_node)
+    workflow.add_node("mechanical_failure", mechanical_execution_failure_node)
     workflow.add_node("output_failure", output_failure_node)
 
     workflow.add_edge(START, "planner")
@@ -95,7 +111,20 @@ def build_graph(
     workflow.add_conditional_edges(
         "executor",
         route_after_execution,
-        {"verifier": "verifier", "policy_failure": "policy_failure"},
+        {
+            "verifier": "verifier",
+            "mechanical_repair": "mechanical_repair",
+            "mechanical_failure": "mechanical_failure",
+        },
+    )
+    workflow.add_conditional_edges(
+        "mechanical_repair",
+        route_after_execution,
+        {
+            "verifier": "verifier",
+            "mechanical_repair": "mechanical_repair",
+            "mechanical_failure": "mechanical_failure",
+        },
     )
     workflow.add_conditional_edges(
         "verifier",
@@ -119,6 +148,6 @@ def build_graph(
     )
     workflow.add_edge("output_repair", "output_validator")
     workflow.add_edge("failure_finalizer", END)
-    workflow.add_edge("policy_failure", END)
+    workflow.add_edge("mechanical_failure", END)
     workflow.add_edge("output_failure", END)
     return workflow.compile()

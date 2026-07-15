@@ -37,6 +37,9 @@ cp .env.example .env
 Set `NEBIUS_API_KEY` to your Nebius Token Factory API key and `NEBIUS_MODEL` to
 the model you want to use. `NEBIUS_BASE_URL` defaults to
 `https://api.tokenfactory.nebius.com/v1/` and can be overridden when needed.
+`MAX_CODE_REPAIR_ATTEMPTS` controls bounded mechanical generated-code repairs
+(default `50`); `CODE_REPAIR_NO_PROGRESS_ATTEMPTS` controls the repeated-error
+early-stop threshold (default `3`).
 Never commit `.env` or its API key.
 
 ## Commands
@@ -112,8 +115,10 @@ standard library and installed `pandas`, `numpy`, or `scipy`. A conservative AST
 check rejects obvious network/process/environment/deletion operations and
 unstaged literal reads or out-of-run literal writes. Execution uses a minimal
 environment, an isolated per-goal working directory, a 30-second default
-timeout, and bounded stdout/stderr capture. One mechanical code-repair attempt
-is allowed.
+timeout, and bounded stdout/stderr capture. Failed generated code stays in a
+bounded mechanical repair loop (default 50 repairs, with repeated-no-progress
+early termination) and never enters scientific verification until it produces a
+valid result object.
 
 This runner is prototype defense in depth, not production-grade sandboxing or
 an OS security boundary. Do not run untrusted generated code in a sensitive
@@ -275,7 +280,7 @@ public prompt, data, answer schema, backbone model, and generation settings:
   one constrained Python execution. It has no Planner, Verifier, repair, or
   replan.
 - `agent` uses the existing Planner, goal-by-goal Executor, trusted tools or
-  generated Python, bounded local repair, Verifier, bounded global replan, and
+generated Python, bounded local repair, Verifier, bounded global replan, and
   validated final JSON workflow.
 
 Internal Verifier approval is not the benchmark grade. Ground truth, reference
@@ -337,7 +342,7 @@ No live comparison result is claimed in this README.
 ## Current scope
 
 The project currently provides goal-driven sequential execution, the bounded
-verification loop, one bounded local code repair, one bounded JSON-output
+verification loop, bounded mechanical local code repair, one bounded JSON-output
 repair, deterministic offline examples, a small live Verifier diagnostic suite,
 an isolated three-way benchmark harness, environment-based configuration, a
 minimal OpenAI-compatible Nebius client factory, and manual live

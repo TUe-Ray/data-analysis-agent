@@ -80,17 +80,12 @@ def test_generated_python_failure_terminates_without_approved_results(
     result = run_scenario("generated-python-failure", tmp_path)
     goal_dir = Path(result["run_directory"]) / "goals/compute_successive_difference"
 
-    assert result["status"] == "stopped_after_max_replans"
+    assert result["status"] == "mechanical_execution_failed"
     assert result["completed_goal_results"] == []
     assert result["validated_final_answer"]["key_results"] == {}
-    assert result["generated_script_count"] == 4
-    assert result["code_repair_count"] == 2
-    assert sorted(path.name for path in goal_dir.glob("generated_code_v*.py")) == [
-        "generated_code_v1.py",
-        "generated_code_v2.py",
-        "generated_code_v3.py",
-        "generated_code_v4.py",
-    ]
+    assert result["replan_count"] == 0
+    assert "mechanical_repair_no_progress" in result["final_answer"]
+    assert len(list(goal_dir.glob("generated_code_v*.py"))) >= 2
 
 
 def test_python_policy_failure_skips_verifier_and_global_replan(tmp_path: Path) -> None:
@@ -138,13 +133,16 @@ def test_python_policy_failure_skips_verifier_and_global_replan(tmp_path: Path) 
             "run_directory": str(tmp_path / "run"),
             "replan_count": 0,
             "max_replans": 1,
+            "max_code_repair_attempts": 1,
+            "max_code_repair_no_progress_attempts": 1,
             "trace": [],
         }
     )
 
-    assert result["status"] == "python_policy_failure"
+    assert result["status"] == "mechanical_execution_failed"
     assert result["replan_count"] == 0
     assert result["policy_failure_reason"].startswith("PythonPolicyError:")
+    assert result["execution_failure_category"] == "policy_error"
     assert [call.role for call in model.calls].count("verifier") == 0
 
 

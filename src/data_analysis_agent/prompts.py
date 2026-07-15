@@ -176,10 +176,13 @@ def build_python_repair_messages(
     *,
     current_goal: dict[str, JsonValue],
     code: str,
+    failure_category: str,
     stdout: str,
     stderr: str,
     error: str | None,
     staged_file_paths: list[str],
+    goal_directory: str,
+    repair_history: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
     """Supply repair only the fixed goal, code, local failure, and allowlist."""
     return [
@@ -189,11 +192,18 @@ def build_python_repair_messages(
             "content": (
                 f"Current IntermediateGoal:\n{json.dumps(current_goal)}\n\n"
                 f"Generated code:\n{code}\n\n"
+                f"Typed failure category:\n{failure_category}\n\n"
                 f"stdout:\n{stdout}\n\n"
                 f"stderr:\n{stderr}\n\n"
                 f"Execution error:\n{error or 'none'}\n\n"
                 "Allowed libraries: Python standard library, pandas, numpy, scipy.\n"
                 f"Allowed files:\n{json.dumps(staged_file_paths)}\n\n"
+                f"Allowed output directory:\n{goal_directory}\n\n"
+                "Recent compact repair history:\n"
+                f"{json.dumps(repair_history or [], ensure_ascii=False)}\n\n"
+                "Change the implementation that caused this mechanical failure; do "
+                "not change the scientific method, constraints, or required "
+                "outputs.\n\n"
                 "If this is a PythonPolicyError, repair using only the exact paths "
                 "above as direct literals (for example "
                 'pd.read_csv("inputs/patients.csv")). Do not use __file__, '

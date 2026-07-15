@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
@@ -73,6 +73,9 @@ READ_METHODS = {"read_csv", "read_table", "read_text", "read_bytes", "loadtxt"}
 PATH_DISCOVERY_CALLS = {"glob", "rglob", "iterdir", "walk", "scandir", "listdir"}
 
 StaticPathValue: TypeAlias = str | dict[str, str]
+ExecutionFailureCategory: TypeAlias = Literal[
+    "policy_error", "syntax_error", "runtime_error", "timeout", "result_contract_error"
+]
 
 
 class PythonExecutionResult(BaseModel):
@@ -91,6 +94,9 @@ class PythonExecutionResult(BaseModel):
     timed_out: bool = False
     script_path: str
     artifact_paths: list[str] = Field(default_factory=list)
+    policy_validated: bool = False
+    parsed_result: bool = False
+    failure_category: ExecutionFailureCategory | None = None
 
 
 class PythonPolicyError(ValueError):
@@ -431,6 +437,9 @@ class LocalPythonRunner:
         timed_out = False
         error_message: str | None = None
         parsed_result: dict[str, JsonValue] = {}
+        policy_validated = False
+        parsed_result_available = False
+        failure_category: ExecutionFailureCategory | None = None
 
         try:
             validate_generated_code(
@@ -439,6 +448,7 @@ class LocalPythonRunner:
                 allowed_files=allowed_files,
                 working_directory=execution_directory,
             )
+            policy_validated = True
             environment = {
                 "PATH": os.environ.get("PATH", ""),
                 "PYTHONHASHSEED": "0",
@@ -459,9 +469,13 @@ class LocalPythonRunner:
             stderr = completed.stderr[-self.output_limit :]
             if exit_code != 0:
                 error_message = f"Generated Python exited with code {exit_code}"
+                failure_category = (
+                    "syntax_error" if "SyntaxError" in stderr else "runtime_error"
+                )
             else:
                 try:
                     parsed_result = _parse_json_result(stdout, goal_directory)
+                    parsed_result_available = True
                 except (
                     OSError,
                     UnicodeError,
@@ -469,8 +483,10 @@ class LocalPythonRunner:
                     ValueError,
                 ) as error:
                     error_message = f"Invalid JSON output: {error}"
+                    failure_category = "result_contract_error"
         except PythonPolicyError as error:
             error_message = f"PythonPolicyError: {error}"
+            failure_category = "policy_error"
         except subprocess.TimeoutExpired as error:
             timed_out = True
             stdout = _bounded_text(error.stdout, self.output_limit)
@@ -478,6 +494,7 @@ class LocalPythonRunner:
             error_message = (
                 f"Execution timed out after {self.timeout_seconds:g} seconds"
             )
+            failure_category = "timeout"
 
         duration = time.perf_counter() - started
         if self.progress_callback:
@@ -510,6 +527,9 @@ class LocalPythonRunner:
             timed_out=timed_out,
             script_path=str(script_path),
             artifact_paths=artifact_paths,
+            policy_validated=policy_validated,
+            parsed_result=parsed_result_available,
+            failure_category=failure_category,
         )
         execution_path = goal_directory / f"execution_result_v{version}.json"
         execution_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")

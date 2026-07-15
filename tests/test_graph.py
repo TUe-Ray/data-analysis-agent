@@ -32,11 +32,13 @@ def test_graph_compiles_successfully() -> None:
     assert {
         "planner",
         "executor",
+        "mechanical_repair",
         "verifier",
         "final_answer_generator",
         "output_validator",
         "output_repair",
         "failure_finalizer",
+        "mechanical_failure",
         "output_failure",
     }.issubset(graph.get_graph().nodes)
 

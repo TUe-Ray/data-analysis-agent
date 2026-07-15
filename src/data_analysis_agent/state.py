@@ -28,6 +28,24 @@ class OutputValidationRecord(TypedDict):
     route: str
 
 
+class CodeExecutionRecord(TypedDict, total=False):
+    """One generated-code attempt, including the machine-readable failure type."""
+
+    goal_id: str
+    version: int
+    attempt: int
+    failure_category: str | None
+    exit_code: int | None
+    timed_out: bool
+    policy_validated: bool
+    parsed_result: bool
+    error: str | None
+    source_changed: bool
+    route: str
+    code_repair_attempts_for_current_goal: int
+    scientific_replan_count: int
+
+
 class AgentState(TypedDict, total=False):
     """Values passed between the V0 Planner, Executor, and Verifier nodes."""
 
@@ -53,6 +71,26 @@ class AgentState(TypedDict, total=False):
     trusted_tool_calls: int
     generated_script_count: int
     code_repair_count: int
+    code_repair_attempts_for_current_goal: int
+    max_code_repair_attempts: int
+    code_repair_no_progress_count: int
+    max_code_repair_no_progress_attempts: int
+    code_repair_no_progress: bool
+    current_generated_code: str
+    generated_execution_history: list[dict[str, JsonValue]]
+    code_execution_history: list[CodeExecutionRecord]
+    execution_failure_category: str | None
+    failure_category: (
+        Literal[
+            "policy_error",
+            "syntax_error",
+            "runtime_error",
+            "timeout",
+            "result_contract_error",
+            "scientific_verification_failure",
+        ]
+        | None
+    )
     execution_result: str
     verification_decision: Literal["PASS", "REPLAN"]
     verification_feedback: str
