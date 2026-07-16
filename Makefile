@@ -1,4 +1,4 @@
-.PHONY: install format lint test check api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-valid-json demo-v0-output-repair demo-v0-output-failure demo-v0-live demo-tools-success demo-python-success demo-python-repair demo-python-failure verifier-eval-live verifier-eval-live-3 benchmark-smoke benchmark-smoke-live
+.PHONY: install install-studio format lint test check graph-export studio api-check demo-v0-happy demo-v0-replan demo-v0-max-replan demo-v0-valid-json demo-v0-output-repair demo-v0-output-failure demo-v0-live demo-tools-success demo-python-success demo-python-repair demo-python-failure verifier-eval-live verifier-eval-live-3 benchmark-smoke benchmark-smoke-live
 
 VENV ?= .venv
 PYTHON ?= $(VENV)/bin/python
@@ -7,6 +7,9 @@ PYTEST = $(PYTHON) -m pytest
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
+
+install-studio:
+	$(PYTHON) -m pip install -e ".[dev,studio]"
 
 format:
 	$(RUFF) format .
@@ -21,6 +24,12 @@ check:
 	$(RUFF) format --check .
 	$(RUFF) check .
 	$(PYTEST)
+
+graph-export:
+	$(PYTHON) scripts/export_graph.py
+
+studio:
+	LANGSMITH_TRACING=false $(VENV)/bin/langgraph dev --no-browser --no-reload
 
 api-check:
 	$(PYTHON) scripts/check_nebius_api.py

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -31,6 +32,8 @@ from data_analysis_agent.nodes import (
 from data_analysis_agent.python_runner import LocalPythonRunner
 from data_analysis_agent.schemas import HighLevelPlan
 from data_analysis_agent.state import AgentState
+
+InputAdapter = Callable[[AgentState], dict[str, object]]
 
 
 def route_after_verification(
@@ -108,10 +111,22 @@ def build_graph(
     model: RoleModel,
     output_provider: FinalOutputProvider | None = None,
     runner: LocalPythonRunner | None = None,
+    *,
+    input_schema: type[Any] | None = None,
+    input_adapter: InputAdapter | None = None,
 ):
-    """Compile the bounded scientific and JSON-output validation workflow."""
+    """Compile the bounded scientific and JSON-output validation workflow.
+
+    ``input_schema`` and ``input_adapter`` are an opt-in public-input boundary.
+    They let a caller such as Studio expose a small form while retaining the full
+    internal ``AgentState`` used by the existing workflow and its callers.
+    """
+    if (input_schema is None) != (input_adapter is None):
+        raise ValueError("input_schema and input_adapter must be supplied together")
     output_provider = output_provider or DeterministicFinalOutputProvider()
-    workflow = StateGraph(AgentState)
+    workflow = StateGraph(AgentState, input_schema=input_schema)
+    if input_adapter is not None:
+        workflow.add_node("prepare_input", input_adapter)
     workflow.add_node("planner", make_planner_node(model))
     workflow.add_node("planner_validator", planner_validator_node)
     workflow.add_node("planner_repair", make_planner_repair_node(model))
@@ -131,7 +146,11 @@ def build_graph(
     workflow.add_node("output_failure", output_failure_node)
     workflow.add_node("partial_run_finalizer", partial_run_finalizer_node)
 
-    workflow.add_edge(START, "planner")
+    if input_adapter is None:
+        workflow.add_edge(START, "planner")
+    else:
+        workflow.add_edge(START, "prepare_input")
+        workflow.add_edge("prepare_input", "planner")
     workflow.add_edge("planner", "planner_validator")
     workflow.add_conditional_edges(
         "planner_validator",

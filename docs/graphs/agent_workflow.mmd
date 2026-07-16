@@ -1,0 +1,54 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	planner(planner)
+	planner_validator(planner_validator)
+	planner_repair(planner_repair)
+	select_current_goal(select_current_goal)
+	executor(executor)
+	mechanical_repair(mechanical_repair)
+	verifier(verifier)
+	final_answer_generator(final_answer_generator)
+	output_validator(output_validator)
+	output_repair(output_repair)
+	failure_finalizer(failure_finalizer)
+	planner_output_failure(planner_output_failure)
+	mechanical_failure(mechanical_failure)
+	output_failure(output_failure)
+	partial_run_finalizer(partial_run_finalizer)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> planner;
+	executor -.-> mechanical_failure;
+	executor -.-> mechanical_repair;
+	executor -.-> verifier;
+	final_answer_generator --> output_validator;
+	mechanical_repair -.-> mechanical_failure;
+	mechanical_repair -.-> verifier;
+	output_repair --> output_validator;
+	output_validator -. &nbsp;end&nbsp; .-> __end__;
+	output_validator -.-> output_failure;
+	output_validator -.-> output_repair;
+	planner --> planner_validator;
+	planner_repair --> planner_validator;
+	planner_validator -.-> planner_output_failure;
+	planner_validator -.-> planner_repair;
+	planner_validator -.-> select_current_goal;
+	select_current_goal --> executor;
+	verifier -.-> failure_finalizer;
+	verifier -.-> final_answer_generator;
+	verifier -.-> partial_run_finalizer;
+	verifier -.-> planner;
+	verifier -.-> select_current_goal;
+	failure_finalizer --> __end__;
+	mechanical_failure --> __end__;
+	output_failure --> __end__;
+	partial_run_finalizer --> __end__;
+	planner_output_failure --> __end__;
+	mechanical_repair -.-> mechanical_repair;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

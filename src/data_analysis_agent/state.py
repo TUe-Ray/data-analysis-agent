@@ -70,6 +70,7 @@ class AgentState(TypedDict, total=False):
     """Values passed between the V0 Planner, Executor, and Verifier nodes."""
 
     question: str
+    input_data: list[str]
     file_paths: list[str]
     input_context: str
     plan: str

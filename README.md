@@ -233,6 +233,84 @@ Use `make demo-v0-valid-json` for direct validation,
 Detailed candidate output, Pydantic errors, repair output, and final validated
 JSON are stored in `runs/demo_<timestamp>/workflow.log`.
 
+## LangGraph architecture diagram
+
+Export the compiled graph's static orchestration diagram after creating and
+configuring `.env` as described above. This builds the same Nebius model and
+runner configuration as a live run, but it does **not** send a model request.
+
+```bash
+make graph-export
+```
+
+The command writes these files under `docs/graphs/`:
+
+- `agent_workflow.mmd` — Mermaid source, generated locally.
+
+The default deliberately keeps the diagram local. To request the optional PNG
+from Mermaid.Ink, which sends Mermaid source to that external renderer, run:
+
+```bash
+.venv/bin/python scripts/export_graph.py --mermaid-ink-png
+```
+
+This is the static `StateGraph`: Planner, validation and repair nodes, Executor,
+Verifier, finalization, and their conditional loops. Dynamic scientific goals
+such as `G1` through `G11` remain data in `AgentState.high_level_plan`, so they
+are not LangGraph nodes and are intentionally not shown as separate boxes.
+
+In a notebook, render the same compiled graph inline:
+
+```python
+from IPython.display import Image, display
+
+display(Image(workflow.get_graph().draw_mermaid_png()))
+```
+
+## Local LangGraph Studio
+
+Install the optional local Studio server dependency (already installed in this
+workspace) with:
+
+```bash
+make install-studio
+```
+
+`langgraph.json` registers the live Studio entry point at
+`src/data_analysis_agent/studio_graph.py`. It uses the existing Nebius `.env`
+configuration. The local Agent Server supplies in-memory persistence, enabling
+per-thread state, node traversal, and replay/time-travel while it is running.
+Studio's Input form exposes only `question` and `input_data`. Enter
+`input_data` as a list of absolute paths to local CSV or UTF-8 text files, for
+example `["/absolute/path/measurements.csv"]`; the initial `prepare_input` node
+validates and stages those files into the existing internal state. Normal demos,
+tests, and benchmark calls keep their unchanged full-state input path.
+
+When the Agent Server runs in WSL but Studio is open in Windows, `input_data`
+also accepts Windows paths such as `C:\\Users\\User1\\Downloads\\visits.csv`.
+They are automatically mapped to `/mnt/c/Users/User1/Downloads/visits.csv`.
+
+Studio's generated form does not provide a generic local-file drag-and-drop
+upload control. A drag-and-drop uploader would require a separate local web UI
+or upload endpoint; this graph deliberately accepts only paths readable by the
+local Agent Server.
+
+Start it with local tracing disabled:
+
+```bash
+make studio
+```
+
+The local Agent Server listens on `http://127.0.0.1:2024` by default and prints
+the Studio link in the terminal. Inspect `high_level_plan`, `current_goal`,
+`completed_goal_results`, `approved_goal_artifacts`, `pending_goal_artifacts`,
+`replan_count`, `planner_response_history`, `code_execution_history`,
+`consecutive_failure_fingerprint`, and `verification_decision` at each node.
+The in-memory checkpoints are discarded when the server stops. The `studio`
+target sets `LANGSMITH_TRACING=false`, so traces are not exported to LangSmith;
+it also disables hot reload so generated benchmark artifacts do not interrupt an
+active debugging session.
+
 ## Verifier Intelligence Evaluation
 
 The deterministic offline scenarios above test graph routing; they do not
