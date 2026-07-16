@@ -28,7 +28,7 @@ def test_partial_smoke_uses_agent_stack_and_skips_full_grading(tmp_path: Path) -
     partial_summary = (
         tmp_path
         / summary.benchmark_run_id
-        / "agent/successive_difference_smoke/repeat_001/agent_run"
+        / "agent/successive_difference_smoke/default/repeat_001/agent_run"
         / "partial_run_summary.json"
     )
     assert partial_summary.is_file()

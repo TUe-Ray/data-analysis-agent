@@ -3,7 +3,10 @@
 import json
 from pathlib import Path
 
-from data_analysis_agent.benchmark_approaches import run_single_agent_checker
+from data_analysis_agent.benchmark_approaches import (
+    run_single_agent,
+    run_single_agent_checker,
+)
 from data_analysis_agent.benchmark_types import BenchmarkConfig, PublicTaskView
 from data_analysis_agent.models import ScriptedRoleModel
 from data_analysis_agent.python_runner import LocalPythonRunner
@@ -69,6 +72,43 @@ def test_final_checker_runs_once_without_planner_or_per_goal_verifier(
     assert outcome.verifier_decisions == ["PASS"]
     assert outcome.global_checker_repair_count == 0
     assert [call.role for call in model.calls] == ["single_agent", "final_checker"]
+
+
+def test_low_single_agent_uses_the_identical_pre_checker_core(tmp_path: Path) -> None:
+    generation = _generation(1)
+    low_model = ScriptedRoleModel({"single_agent": [generation]})
+    middle_model = ScriptedRoleModel(
+        {
+            "single_agent": [generation],
+            "final_checker": [
+                '{"decision":"PASS","repair_scope":"none","feedback":"Complete."}'
+            ],
+        }
+    )
+
+    low = run_single_agent(
+        public=_public(tmp_path / "low"),
+        model=low_model,
+        run_directory=tmp_path / "low",
+        config=_config().model_copy(update={"approaches": ["single_agent"]}),
+    )
+    middle = run_single_agent_checker(
+        public=_public(tmp_path / "middle"),
+        model=middle_model,
+        run_directory=tmp_path / "middle",
+        config=_config(),
+    )
+
+    assert low.status == middle.status == "completed"
+    assert low.candidate == middle.candidate == {"value": 1}
+    assert low_model.calls[0].messages[0] == middle_model.calls[0].messages[0]
+    assert (
+        "Task prompt:\nReturn one integer value."
+        in low_model.calls[0].messages[1]["content"]
+    )
+    assert [call.role for call in low_model.calls] == ["single_agent"]
+    assert low.verifier_decisions == []
+    assert low.global_checker_repair_count == 0
 
 
 def test_final_checker_repair_regenerates_and_executes_python(tmp_path: Path) -> None:
@@ -184,12 +224,13 @@ def test_single_agent_uses_resolved_staged_file_path_from_its_execution_cwd(
     assert "Relative input paths are invalid" in prompt
     assert "bare path as a code line" in model.calls[0].messages[0]["content"]
     assert "semantic\ncolumn names" in model.calls[0].messages[0]["content"]
-    assert "before applying that transformation" in model.calls[0].messages[0][
-        "content"
-    ]
-    assert "len(original_rows) - len(deduplicated_rows)" in model.calls[0].messages[
-        0
-    ]["content"]
+    assert (
+        "before applying that transformation" in model.calls[0].messages[0]["content"]
+    )
+    assert (
+        "len(original_rows) - len(deduplicated_rows)"
+        in model.calls[0].messages[0]["content"]
+    )
     checker_prompt = model.calls[1].messages[1]["content"]
     assert "BEGIN FILE: data.csv" in checker_prompt
     assert "value\n1" in checker_prompt

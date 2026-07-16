@@ -1,4 +1,9 @@
 {
+  "default_prompt_variant": "recipe",
+  "prompt_variants": {
+    "recipe": "prompt.txt",
+    "requirements_only": "prompts/requirements_only.txt"
+  },
   "answer_schema": {
     "type": "object",
     "required": [

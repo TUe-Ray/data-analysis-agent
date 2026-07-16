@@ -27,6 +27,7 @@ from data_analysis_agent.benchmark_grading import (
     numeric_match,
 )
 from data_analysis_agent.benchmark_tasks import (
+    BenchmarkTaskError,
     load_benchmark_task,
     stage_public_task,
 )
@@ -155,6 +156,64 @@ def test_public_task_view_excludes_private_grading_fields(task) -> None:
     assert set(PublicTaskView.model_fields).isdisjoint(
         {"grader_path", "reference_path", "reference"}
     )
+
+
+def test_longitudinal_prompt_variants_share_public_data_and_private_grading() -> None:
+    recipe = load_benchmark_task(
+        DEFAULT_TASKS_ROOT, "longitudinal_treatment_response", "recipe"
+    )
+    requirements_only = load_benchmark_task(
+        DEFAULT_TASKS_ROOT, "longitudinal_treatment_response", "requirements_only"
+    )
+
+    assert recipe.public.prompt_variant == "recipe"
+    assert requirements_only.public.prompt_variant == "requirements_only"
+    assert recipe.public.data_contents == requirements_only.public.data_contents
+    assert recipe.public.answer_schema == requirements_only.public.answer_schema
+    assert recipe.private == requirements_only.private
+    assert "1. Normalize treatment arms" in recipe.public.prompt
+    assert (
+        "Determine an appropriate analysis plan yourself"
+        in requirements_only.public.prompt
+    )
+
+
+def test_unknown_prompt_variant_fails_clearly() -> None:
+    with pytest.raises(BenchmarkTaskError, match="unknown"):
+        load_benchmark_task(
+            DEFAULT_TASKS_ROOT, "longitudinal_treatment_response", "unknown"
+        )
+
+
+def test_offline_longitudinal_3x2_persists_distinct_prompt_cells(
+    tmp_path: Path,
+) -> None:
+    config = BenchmarkConfig(
+        model="offline-scripted-smoke",
+        task_ids=["longitudinal_treatment_response"],
+        prompt_variants=["recipe", "requirements_only"],
+        approaches=["single_agent", "single_agent_checker", "agent"],
+    )
+
+    summary, results = run_benchmark(config=config, output_root=tmp_path)
+
+    assert len(results) == 6
+    assert {result.prompt_variant for result in results} == {
+        "recipe",
+        "requirements_only",
+    }
+    assert len({result.artifact_directory for result in results}) == 6
+    assert set(summary.metrics_by_prompt_variant) == {
+        "recipe",
+        "requirements_only",
+    }
+    by_cell = {(result.prompt_variant, result.approach): result for result in results}
+    assert by_cell["recipe", "single_agent"].api_call_count == 1
+    assert by_cell["recipe", "single_agent"].verifier_decisions == []
+    assert by_cell["recipe", "single_agent"].global_checker_repair_count == 0
+    assert by_cell["recipe", "single_agent_checker"].api_call_count == 2
+    assert by_cell["recipe", "single_agent_checker"].verifier_decisions == ["PASS"]
+    assert by_cell["recipe", "agent"].api_call_count == 4
 
 
 def test_baseline_messages_contain_only_public_material(task, tmp_path: Path) -> None:
@@ -367,8 +426,7 @@ def test_staging_and_python_policy_exclude_private_files(task, tmp_path: Path) -
     private_reference = Path(task.private.reference_path)
     result = LocalPythonRunner().run(
         code=(
-            f"print(open({str(private_reference)!r}).read())\n"
-            "__agent_result__ = {}\n"
+            f"print(open({str(private_reference)!r}).read())\n__agent_result__ = {{}}\n"
         ),
         goal_directory=attempt / "execution",
         allowed_files=[(attempt / path).resolve() for path in public.data_files],
@@ -624,6 +682,7 @@ def test_agent_provider_failure_preserves_partial_metrics_and_log(
     public = stage_public_task(task.public, attempt)
     model = EmptyResponseModel()
     workflow = PartiallyCompletedWorkflow()
+
     def build_workflow(recorder, *_args):
         workflow.recorder = recorder
         return workflow
@@ -701,6 +760,20 @@ def test_orchestrator_isolates_attempts_persists_rows_and_summarizes_offline(
     assert "direct_answer" in output
 
 
+def test_summary_aligns_the_longest_approach_identifier(tmp_path: Path) -> None:
+    config = BenchmarkConfig(
+        model="offline",
+        task_ids=["successive_difference_smoke"],
+        approaches=["single_agent", "single_agent_checker", "agent"],
+    )
+    summary, results = run_benchmark(config=config, output_root=tmp_path)
+
+    output_lines = format_benchmark_summary(summary, results).splitlines()
+    header = next(line for line in output_lines if line.startswith("Approach "))
+    row = next(line for line in output_lines if line.startswith("single_agent_checker"))
+    assert header.index("Passed") == row.index("1/1")
+
+
 def test_benchmark_runs_directory_is_gitignored() -> None:
     gitignore = (DEFAULT_TASKS_ROOT.parent / ".gitignore").read_text(encoding="utf-8")
     assert "benchmark_runs/" in gitignore.splitlines()
@@ -745,7 +818,7 @@ def test_transport_failure_is_ungraded_infrastructure_error(
     assert "Grading skipped — infrastructure error" in output
     grade_path = (
         tmp_path / summary.results_path
-    ).parent / "direct_answer/successive_difference_smoke/repeat_001/grade.json"
+    ).parent / "direct_answer/successive_difference_smoke/default/repeat_001/grade.json"
     assert json.loads(grade_path.read_text(encoding="utf-8"))["graded"] is False
 
 

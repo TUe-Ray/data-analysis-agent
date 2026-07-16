@@ -352,7 +352,7 @@ This is a small diagnostic suite, not a comprehensive scientific benchmark.
 Later versions will add deterministic numerical and scientific validators to
 reduce reliance on an LLM as judge.
 
-## Three-way benchmark harness
+## Benchmark harness and 3×2 ablation
 
 The benchmark runs every task through three independent approaches on the same
 public prompt, data, answer schema, backbone model, and generation settings:
@@ -361,11 +361,49 @@ public prompt, data, answer schema, backbone model, and generation settings:
   and data. It makes exactly one model call and has no execution, tools, retry,
   or output repair.
 - `one_shot_code` measures the benefit of one code-generation call followed by
-  one constrained Python execution. It has no Planner, Verifier, repair, or
-  replan.
+one constrained Python execution. It has no Planner, Verifier, repair, or
+replan.
+- `single_agent` is the Low architecture: one iterative structured-Python
+  analysis agent with the shared bounded mechanical-repair infrastructure, but
+  no model checker, Planner, or per-goal Verifier.
+- `single_agent_checker` is the Mid architecture: the same iterative analysis
+  core followed by exactly one independent final checker and, only on `REPAIR`, one
+  grounded structured-Python rerun.
 - `agent` uses the existing Planner, goal-by-goal Executor, trusted tools or
 generated Python, bounded local repair, Verifier, bounded global replan, and
   validated final JSON workflow.
+
+The human-readable architecture labels are Low — Single agent; Mid — Single
+agent + final verifier; and Full — Planner + Executor + per-goal Verifier.
+`one_shot_code` remains a separate legacy one-call baseline.
+
+Task packages may expose multiple public prompt variants without duplicating
+their CSVs, answer schema, private reference, or private grader. The longitudinal
+task declares `recipe` (the default) and `requirements_only`. Supply
+`--prompt-variant` once per desired variant; omitting it selects the task default.
+The primary 3×2 experiment is:
+
+```bash
+python -m data_analysis_agent.benchmark \
+  --task longitudinal_treatment_response \
+  --prompt-variant recipe \
+  --prompt-variant requirements_only \
+  --approaches single_agent,single_agent_checker,agent \
+  --repeats 1 \
+  --live
+```
+
+Attempts are isolated by variant, for example:
+
+```text
+benchmark_runs/<run_id>/single_agent/longitudinal_treatment_response/recipe/repeat_001/
+benchmark_runs/<run_id>/single_agent/longitudinal_treatment_response/requirements_only/repeat_001/
+```
+
+`results.jsonl`, `config.json`, and each result identify the prompt variant.
+`summary.json` retains aggregate approach metrics and adds
+`metrics_by_prompt_variant[variant][approach]`; when multiple variants are run,
+the terminal summary prints one table per variant.
 
 Internal Verifier approval is not the benchmark grade. Ground truth, reference
 values, grader code, and private grading metadata are isolated from every

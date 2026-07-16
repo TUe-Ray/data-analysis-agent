@@ -1,0 +1,72 @@
+You are analyzing a synthetic longitudinal treatment-response study using all three
+supplied CSV files. The analysis is descriptive: do not make a causal claim and
+do not run a hypothesis test.
+
+Study objective
+
+Produce the complete descriptive treatment-response results specified below.
+
+Patient and treatment definitions
+
+Normalize treatment arms by stripping surrounding whitespace, comparing
+case-insensitively, and treating underscores as spaces. Map `A`, `Arm A`,
+`treatment_a`, and `Treatment A` to arm A; map the analogous B values to arm B.
+Any other or missing treatment-arm value is ineligible. A patient is eligible
+only when age is 18 through 75 inclusive, consent (after trimming and case
+normalization) is `yes`, the arm maps to A or B, and `treatment_start_date` is a
+valid ISO date.
+
+Visit validity and record-selection requirements
+
+Remove exact duplicate rows from `visits.csv` across all columns, retaining the
+first occurrence. A remaining visit is valid only if `measurement_status`, after
+trimming and case normalization, is `valid` or `reviewed`; `value` is present,
+numeric, and finite; `quality_score` is present, numeric, and finite; and
+`measurement_date` is a valid ISO date.
+
+For each included patient, a baseline candidate is a valid visit from day -14
+through day -1 inclusive relative to treatment start. Select the candidate with
+the largest relative day; break same-day ties by higher `quality_score`, then
+lexicographically smallest `record_id`. A follow-up candidate is a valid visit
+from day 28 through day 42 inclusive. Select the one with smallest absolute
+distance from day 35; break ties by higher `quality_score`, earlier measurement
+date, then lexicographically smaller `record_id`.
+
+Exclusion requirements
+
+For a patient passing basic eligibility, exclude before record selection if any
+`exclusions.csv` row has `effective_date <= treatment_start_date`. After the
+follow-up record is selected, exclude when any exclusion has
+`treatment_start_date < effective_date <= selected_followup_date`. An exclusion
+after the selected follow-up date does not remove the patient. Patients with no
+valid baseline or no valid follow-up are removed at the applicable criterion.
+
+Required statistical outputs
+
+For each remaining complete patient pair, calculate
+`change = followup_value - baseline_value`; patients rather than visit rows are
+the observational units. For each arm report n, mean baseline value, mean
+follow-up value, mean change, sample SD of change using denominator n - 1, and
+sample SE defined as sample SD / sqrt(n). Report B minus A for the difference in
+mean change.
+
+Auditability and output contract
+
+Report these exact sequential attrition counts: `total_patients`,
+`basic_ineligible`, `eligible_after_basic_checks`, `excluded_pre_start`,
+`no_valid_baseline`, `no_valid_followup`,
+`excluded_post_start_before_or_on_followup`, `complete_pairs`,
+`complete_pairs_arm_a`, `complete_pairs_arm_b`,
+`exact_duplicate_visit_rows_removed`, and
+`invalid_or_missing_visit_rows_excluded` after exact deduplication. Return
+`selected_pairs` sorted by `patient_id` ascending; every entry contains exactly
+`patient_id`, `arm` (normalized to `A` or `B`), `baseline_record_id`,
+`followup_record_id`, `baseline_value`, `followup_value`, and `change`.
+
+Return exactly one JSON object matching the public answer schema. Place computed
+outputs under `key_results` using exactly `attrition`, `arm_statistics`,
+`between_arm_comparison`, and `selected_pairs`. Round floating-point outputs to
+three decimal places only after selections and calculations are complete. Do not
+include Markdown or text outside the JSON object.
+
+Determine an appropriate analysis plan yourself while satisfying every requirement.

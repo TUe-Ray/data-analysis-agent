@@ -41,8 +41,9 @@ DEFAULT_RUNS_ROOT = PROJECT_ROOT / "benchmark_runs"
 ALL_APPROACHES: list[Approach] = [
     "direct_answer",
     "one_shot_code",
-    "agent",
+    "single_agent",
     "single_agent_checker",
+    "agent",
 ]
 
 
@@ -57,12 +58,12 @@ def _slug(value: str, *, limit: int = 48) -> str:
 
 
 def benchmark_scope_label(config: BenchmarkConfig) -> str:
-    """Describe whether this is a single, three-way, or partial comparison."""
+    """Describe whether this is a single, standard, full, or partial comparison."""
     established_three_way = {"direct_answer", "one_shot_code", "agent"}
     if set(config.approaches) == established_three_way:
         return "three_way"
     if set(config.approaches) == set(ALL_APPROACHES):
-        return "four_way"
+        return "five_way"
     if len(config.approaches) == 1:
         return f"{config.approaches[0]}_only"
     return "-vs-".join(config.approaches)
@@ -104,6 +105,73 @@ def _create_benchmark_run_directory(
 
 def _offline_model_factory(approach: Approach, public: PublicTaskView) -> RoleModel:
     """Return deterministic smoke responses without credentials or network access."""
+    if public.task_id == "longitudinal_treatment_response":
+        # This is deliberately only a schema-valid offline fixture.  It lets the
+        # 3x2 harness exercise role boundaries and external grading without
+        # embedding a private reference answer in any model-facing material.
+        placeholder = _schema_placeholder(public.answer_schema)
+        final = json.dumps(placeholder)
+        source = f"__agent_result__ = {placeholder!r}\n"
+        structured_code = json.dumps(
+            {
+                "kind": "python",
+                "code_lines": source.splitlines(),
+                "summary": "Emit a schema-valid offline fixture.",
+            }
+        )
+        single_agent_generation = structured_code
+        final_checker = json.dumps(
+            {
+                "decision": "PASS",
+                "repair_scope": "none",
+                "feedback": "Schema-valid offline fixture.",
+            }
+        )
+        plan = json.dumps(
+            {
+                "scientific_objective": "Exercise the longitudinal offline fixture.",
+                "goals": [
+                    {
+                        "goal_id": "offline_fixture",
+                        "objective": "Produce the complete public answer object.",
+                        "required_outputs": list(
+                            public.answer_schema.get("required", [])
+                        ),
+                        "constraints": ["Use the supplied public task contract."],
+                        "success_criteria": ["Return a schema-valid answer object."],
+                        "depends_on": [],
+                    }
+                ],
+                "final_output_goal_id": "offline_fixture",
+            }
+        )
+        strategy = json.dumps(
+            {
+                "strategy": "generated_python",
+                "capability_name": None,
+                "arguments": {},
+                "concise_reason": "Offline fixture uses generated Python.",
+            }
+        )
+        verifier = json.dumps(
+            {"decision": "PASS", "feedback": "Fixture result is schema-valid."}
+        )
+        responses = {
+            "direct_answer": [final] if approach == "direct_answer" else [],
+            "one_shot_code": ["import json\n" + f"print(json.dumps({placeholder!r}))\n"]
+            if approach == "one_shot_code"
+            else [],
+            "planner": [plan] if approach == "agent" else [],
+            "executor": [strategy, structured_code] if approach == "agent" else [],
+            "verifier": [verifier] if approach == "agent" else [],
+            "single_agent": [single_agent_generation]
+            if approach in {"single_agent", "single_agent_checker"}
+            else [],
+            "final_checker": [final_checker]
+            if approach == "single_agent_checker"
+            else [],
+        }
+        return ScriptedRoleModel(responses)  # type: ignore[arg-type]
     data_path = public.data_files[0]
     final = json.dumps(
         {
@@ -225,11 +293,40 @@ print(json.dumps({{
         "executor": [strategy, structured_code] if approach == "agent" else [],
         "verifier": [verifier] if approach == "agent" else [],
         "single_agent": [single_agent_generation]
-        if approach == "single_agent_checker"
+        if approach in {"single_agent", "single_agent_checker"}
         else [],
         "final_checker": [final_checker] if approach == "single_agent_checker" else [],
     }
     return ScriptedRoleModel(responses)  # type: ignore[arg-type]
+
+
+def _schema_placeholder(schema: object) -> object:
+    """Make a public-schema-valid offline fixture without private answer data."""
+    if not isinstance(schema, dict):
+        return None
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return {}
+        return {
+            key: _schema_placeholder(properties.get(key))
+            for key in required
+            if isinstance(key, str)
+        }
+    if schema_type == "array":
+        return []
+    if schema_type == "integer":
+        return 0
+    if schema_type == "number":
+        return 0.0
+    if schema_type == "boolean":
+        return False
+    return "offline fixture"
 
 
 def _live_model_factory(config: BenchmarkConfig) -> ModelFactory:
@@ -322,6 +419,19 @@ def _metrics(results: list[BenchmarkResult]) -> dict[str, ApproachMetrics]:
     return metrics
 
 
+def _metrics_by_prompt_variant(
+    results: list[BenchmarkResult],
+) -> dict[str, dict[str, ApproachMetrics]]:
+    """Keep prompt cells distinct instead of averaging the 3x2 matrix away."""
+    variants = list(dict.fromkeys(result.prompt_variant for result in results))
+    return {
+        variant: _metrics(
+            [result for result in results if result.prompt_variant == variant]
+        )
+        for variant in variants
+    }
+
+
 def run_benchmark(
     *,
     config: BenchmarkConfig,
@@ -344,11 +454,20 @@ def run_benchmark(
     results_path = run_root / "results.jsonl"
 
     for task_id in config.task_ids:
-        task = load_benchmark_task(tasks_root, task_id)
-        for repeat_index in range(1, config.repeats + 1):
-            for approach in config.approaches:
+        requested_variants = config.prompt_variants or [None]
+        for requested_variant in requested_variants:
+            task = load_benchmark_task(tasks_root, task_id, requested_variant)
+            for repeat_index, approach in (
+                (repeat_index, approach)
+                for repeat_index in range(1, config.repeats + 1)
+                for approach in config.approaches
+            ):
                 attempt_directory = (
-                    run_root / approach / task_id / f"repeat_{repeat_index:03d}"
+                    run_root
+                    / approach
+                    / task_id
+                    / _slug(task.public.prompt_variant)
+                    / f"repeat_{repeat_index:03d}"
                 )
                 reset_attempt_directory(attempt_directory)
                 renderer = (
@@ -365,6 +484,7 @@ def run_benchmark(
                         {
                             "type": "benchmark_started",
                             "task_id": task_id,
+                            "prompt_variant": task.public.prompt_variant,
                             "approach": approach,
                             "model": config.model,
                             "repeat_index": repeat_index,
@@ -472,6 +592,7 @@ def run_benchmark(
                 )
                 result = BenchmarkResult(
                     task_id=task_id,
+                    prompt_variant=task.public.prompt_variant,
                     approach=approach,
                     repeat_index=repeat_index,
                     model=config.model,
@@ -531,6 +652,7 @@ def run_benchmark(
         benchmark_run_id=run_id,
         config=config,
         metrics=_metrics(results),
+        metrics_by_prompt_variant=_metrics_by_prompt_variant(results),
         results_path=relative_to(results_path, project_root),
     )
     (run_root / "summary.json").write_text(
@@ -551,11 +673,18 @@ def format_benchmark_summary(
     }:
         mode_label = "three-way comparison"
     elif set(summary.config.approaches) == set(ALL_APPROACHES):
-        mode_label = "four-way comparison"
+        mode_label = "five-way comparison"
     elif len(summary.config.approaches) == 1:
         mode_label = "single approach"
     else:
         mode_label = "selected approach comparison"
+    approach_width = max(
+        len("Approach"), *(len(item) for item in summary.config.approaches)
+    )
+    table_header = (
+        f"{'Approach':<{approach_width}}   Passed   API calls   "
+        "Transport retries   Response retries   Tokens   Latency   Status"
+    )
     lines = [
         "=" * 60,
         f"BENCHMARK — {task_label}",
@@ -564,6 +693,8 @@ def format_benchmark_summary(
         f"Run ID     : {summary.benchmark_run_id}",
         f"Mode       : {mode_label}",
         f"Approaches : {', '.join(summary.config.approaches)}",
+        "Prompt variants : "
+        + ", ".join(summary.config.prompt_variants or ["task defaults"]),
         f"Model      : {summary.config.model}",
         f"Repeats    : {summary.config.repeats}",
         *(
@@ -575,29 +706,43 @@ def format_benchmark_summary(
             else []
         ),
         "",
-        (
-            "Approach       Passed   API calls   Transport retries   "
-            "Response retries   Tokens   Latency   Status"
-        ),
-        "-" * 98,
+        table_header,
+        "-" * len(table_header),
     ]
-    for approach in summary.config.approaches:
-        metric = summary.metrics[approach]
-        selected = [result for result in results if result.approach == approach]
-        statuses = {result.status for result in selected}
-        status = next(iter(statuses)) if len(statuses) == 1 else "mixed"
-        tokens = (
-            "n/a"
-            if metric.average_total_tokens is None
-            else f"{metric.average_total_tokens:.0f}"
-        )
-        lines.append(
-            f"{approach:<15} {metric.passed_runs}/{metric.attempted_runs:<5} "
-            f"{metric.average_api_calls:>7.1f}   "
-            f"{metric.average_transport_retry_count:>17.1f}   "
-            f"{metric.average_response_retry_count:>12.1f}   {tokens:>6}   "
-            f"{metric.average_latency:>6.2f}s   {status.replace('_', ' ')}"
-        )
+    metric_groups = (
+        summary.metrics_by_prompt_variant.items()
+        if len(summary.metrics_by_prompt_variant) > 1
+        else [
+            (next(iter(summary.metrics_by_prompt_variant), "default"), summary.metrics)
+        ]
+    )
+    for variant, metrics in metric_groups:
+        if len(summary.metrics_by_prompt_variant) > 1:
+            lines.extend([f"PROMPT VARIANT: {variant}", ""])
+        for approach in summary.config.approaches:
+            metric = metrics.get(approach)
+            if metric is None:
+                continue
+            selected = [
+                result
+                for result in results
+                if result.approach == approach and result.prompt_variant == variant
+            ]
+            statuses = {result.status for result in selected}
+            status = next(iter(statuses)) if len(statuses) == 1 else "mixed"
+            tokens = (
+                "n/a"
+                if metric.average_total_tokens is None
+                else f"{metric.average_total_tokens:.0f}"
+            )
+            lines.append(
+                f"{approach:<{approach_width}}   "
+                f"{metric.passed_runs}/{metric.attempted_runs:<5} "
+                f"{metric.average_api_calls:>7.1f}   "
+                f"{metric.average_transport_retry_count:>17.1f}   "
+                f"{metric.average_response_retry_count:>12.1f}   {tokens:>6}   "
+                f"{metric.average_latency:>6.2f}s   {status.replace('_', ' ')}"
+            )
     lines.extend(["", "-" * 60, "ERROR SUMMARY", "-" * 60])
     for approach in summary.config.approaches:
         errors = list(
@@ -657,6 +802,15 @@ def _non_negative_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", action="append", required=True, dest="task_ids")
+    parser.add_argument(
+        "--prompt-variant",
+        action="append",
+        dest="prompt_variants",
+        help=(
+            "Prompt variant to run; repeat for multiple variants "
+            "(default: task default)."
+        ),
+    )
     parser.add_argument("--approaches", type=_parse_approaches, default=ALL_APPROACHES)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--live", action="store_true")
@@ -736,6 +890,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repeats=args.repeats,
             task_ids=args.task_ids,
             approaches=args.approaches,
+            prompt_variants=args.prompt_variants or [],
             live=args.live,
             live_progress=args.live_progress,
             stop_after_goals=args.stop_after_goals,

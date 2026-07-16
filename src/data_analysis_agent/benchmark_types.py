@@ -7,7 +7,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-Approach = Literal["direct_answer", "one_shot_code", "agent", "single_agent_checker"]
+Approach = Literal[
+    "direct_answer",
+    "one_shot_code",
+    "single_agent",
+    "single_agent_checker",
+    "agent",
+]
 AttemptStatus = Literal[
     "completed",
     "wrong_answer",
@@ -27,6 +33,7 @@ class PublicTaskView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: str
+    prompt_variant: str = "default"
     prompt: str
     data_files: list[str]
     data_contents: dict[str, str]
@@ -82,6 +89,7 @@ class BenchmarkConfig(BaseModel):
     repeats: int = Field(default=1, gt=0)
     task_ids: list[str]
     approaches: list[Approach]
+    prompt_variants: list[str] = Field(default_factory=list)
     live: bool = False
     live_progress: bool = True
     stop_after_goals: int | None = Field(default=None, gt=0)
@@ -122,6 +130,7 @@ class BenchmarkResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: str
+    prompt_variant: str = "default"
     approach: Approach
     repeat_index: int
     model: str
@@ -186,6 +195,9 @@ class BenchmarkSummary(BaseModel):
     benchmark_run_id: str
     config: BenchmarkConfig
     metrics: dict[str, ApproachMetrics]
+    metrics_by_prompt_variant: dict[str, dict[str, ApproachMetrics]] = Field(
+        default_factory=dict
+    )
     results_path: str
 
 

@@ -17,7 +17,59 @@ class BenchmarkTaskError(ValueError):
     """Raised when a public/private benchmark task package is malformed."""
 
 
-def load_benchmark_task(tasks_root: Path, task_id: str) -> LoadedBenchmarkTask:
+def _load_prompt_variants(
+    public_root: Path, task_config: dict[str, object], requested_variant: str | None
+) -> tuple[str, str]:
+    """Select a declared prompt safely, preserving legacy task packages."""
+    variants = task_config.get("prompt_variants")
+    if variants is None:
+        if requested_variant not in (None, "default"):
+            raise BenchmarkTaskError(
+                f"Task prompt variant {requested_variant!r} is unknown; "
+                "this legacy task exposes only 'default'."
+            )
+        variant, relative_path = "default", "prompt.txt"
+    else:
+        if not isinstance(variants, dict) or not variants:
+            raise BenchmarkTaskError("prompt_variants must be a non-empty object")
+        default = task_config.get("default_prompt_variant")
+        if not isinstance(default, str) or default not in variants:
+            raise BenchmarkTaskError(
+                "default_prompt_variant must name a declared prompt variant"
+            )
+        variant = requested_variant or default
+        if variant not in variants:
+            raise BenchmarkTaskError(
+                f"Task prompt variant {variant!r} is unknown; available variants: "
+                + ", ".join(sorted(str(name) for name in variants))
+            )
+        relative_path = variants[variant]
+        if not isinstance(relative_path, str):
+            raise BenchmarkTaskError(
+                f"Prompt path for variant {variant!r} must be a string"
+            )
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise BenchmarkTaskError(
+            f"Unsafe prompt path for variant {variant!r}: {relative_path!r}"
+        )
+    prompt_path = (public_root / path).resolve()
+    if public_root.resolve() not in prompt_path.parents or not prompt_path.is_file():
+        raise BenchmarkTaskError(
+            f"Prompt file for variant {variant!r} does not exist inside public/: "
+            f"{relative_path!r}"
+        )
+    try:
+        return variant, prompt_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as error:
+        raise BenchmarkTaskError(
+            f"Could not read prompt variant {variant!r}: {error}"
+        ) from error
+
+
+def load_benchmark_task(
+    tasks_root: Path, task_id: str, prompt_variant: str | None = None
+) -> LoadedBenchmarkTask:
     """Read public content and retain private paths outside the public view."""
     task_root = (tasks_root / task_id).resolve()
     public_root = task_root / "public"
@@ -26,11 +78,11 @@ def load_benchmark_task(tasks_root: Path, task_id: str) -> LoadedBenchmarkTask:
         task_config = json.loads(
             (public_root / "task.json").read_text(encoding="utf-8")
         )
-        prompt = (public_root / "prompt.txt").read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise BenchmarkTaskError(
             f"Could not load public task {task_id}: {error}"
         ) from error
+    variant, prompt = _load_prompt_variants(public_root, task_config, prompt_variant)
     data_root = public_root / "data"
     data_paths = sorted(path for path in data_root.rglob("*") if path.is_file())
     if not data_paths:
@@ -49,6 +101,7 @@ def load_benchmark_task(tasks_root: Path, task_id: str) -> LoadedBenchmarkTask:
         raise BenchmarkTaskError(f"Task {task_id} is missing private grading files")
     public = PublicTaskView(
         task_id=task_id,
+        prompt_variant=variant,
         prompt=prompt,
         data_files=list(data_contents),
         data_contents=data_contents,

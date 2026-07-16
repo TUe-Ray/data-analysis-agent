@@ -7,6 +7,7 @@ import io
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -579,20 +580,39 @@ def _single_agent_status(execution: PythonExecutionResult | None) -> str:
     return "execution_failed"
 
 
-def run_single_agent_checker(
+@dataclass
+class _SingleAgentCoreResult:
+    """Facts from the shared iterative analysis phase before any final checker."""
+
+    recorder: RecordingRoleModel
+    execution_directory: Path
+    staged_files: list[Path]
+    runner: LocalPythonRunner
+    execution: PythonExecutionResult | None
+    source: str
+    candidate: dict[str, JsonValue] | None
+    status: str
+    error: str | None
+    exception_class: str | None
+    local_repairs: int
+
+
+def _run_iterative_single_agent_core(
     *,
     public: PublicTaskView,
     model: RoleModel,
     run_directory: Path,
     config: BenchmarkConfig,
-    progress: ProgressCallback | None = None,
-) -> ApproachOutcome:
-    """Run one iterative code agent and exactly one independent final checker."""
+    progress: ProgressCallback | None,
+) -> _SingleAgentCoreResult:
+    """Run the one analysis generator plus bounded mechanical code repair.
+
+    This deliberately ends at deterministic public-schema validation.  Low and
+    middle architectures call this exact function, making their pre-checker
+    generation, paths, runner, and repair behavior identical.
+    """
     recorder = RecordingRoleModel(model, _model_observer(progress))
     execution_directory = run_directory / "single_agent_run"
-    # Resolve once at the public staging boundary.  Prompts, repair prompts, and
-    # the runner must share this exact allowlist rather than independently
-    # interpreting relative ``inputs/...`` display paths from the Python cwd.
     staged_files = _resolved_public_files(public, run_directory)
     goal = IntermediateGoal(
         goal_id="single_analysis",
@@ -617,8 +637,8 @@ def run_single_agent_checker(
     previous_family: str | None = None
     error: str | None = None
     exception_class: str | None = None
-    checker_decisions: list[str] = []
-    checker_repairs = 0
+    candidate: dict[str, JsonValue] | None = None
+    status = "execution_failed"
     try:
         for version in range(1, max_repairs + 2):
             if version == 1:
@@ -679,6 +699,10 @@ def run_single_agent_checker(
                     version=version,
                 )
                 if execution.success:
+                    candidate = execution.result
+                    _validate_against_public_schema(candidate, public.answer_schema)
+                    status = "completed"
+                    error = None
                     break
                 error = execution.error
                 family = execution.failure_category or "runtime_error"
@@ -686,66 +710,10 @@ def run_single_agent_checker(
             previous_family = family
             if same_family >= no_progress_limit or version > max_repairs:
                 break
-        if execution is None or not execution.success:
+        if status != "completed":
             status = _single_agent_status(execution)
             if execution is None:
                 status = "execution_failed"
-            candidate = None
-        else:
-            candidate = execution.result
-            _validate_against_public_schema(candidate, public.answer_schema)
-            checker_raw = recorder.generate_structured(
-                role="final_checker",
-                messages=build_final_checker_messages(
-                    public=public,
-                    candidate=candidate,
-                    execution=execution.model_dump(mode="json"),
-                ),
-                schema_name="single_agent_final_checker",
-                schema=FinalCheckerOutput.model_json_schema(),
-            )
-            checker_path = execution_directory / "final_checker_response.json"
-            checker_path.write_text(checker_raw, encoding="utf-8")
-            checker = FinalCheckerOutput.model_validate_json(checker_raw)
-            checker_decisions = [checker.decision]
-            checker_repairs = 0
-            if checker.decision == "REPAIR":
-                checker_repairs = 1
-                repaired_raw = recorder.generate_structured(
-                    role="single_agent",
-                    messages=build_single_agent_checker_repair_messages(
-                        public=public,
-                        source=source,
-                        execution=execution,
-                        feedback=checker.feedback,
-                        repair_scope=checker.repair_scope,
-                        staged_files=staged_files,
-                        execution_directory=execution_directory,
-                    ),
-                    schema_name="single_agent_checker_python_repair",
-                    schema=PythonRepair.model_json_schema(),
-                )
-                repair_path = execution_directory / "final_checker_python_repair.json"
-                repair_path.write_text(repaired_raw, encoding="utf-8")
-                repaired = PythonRepair.model_validate_json(repaired_raw)
-                source = repaired.source()
-                execution = runner.run(
-                    code=source,
-                    goal_directory=execution_directory,
-                    allowed_files=staged_files,
-                    version=local_repairs + 2,
-                )
-                if not execution.success:
-                    candidate = None
-                    status = _single_agent_status(execution)
-                    error = execution.error
-                else:
-                    candidate = execution.result
-                    _validate_against_public_schema(candidate, public.answer_schema)
-            if execution.success:
-                _save_json(run_directory / "candidate.json", candidate)
-                status = "completed"
-                error = None
     except (ValueError, ValidationError) as exception:
         candidate = None
         status = "invalid_json"
@@ -755,38 +723,173 @@ def run_single_agent_checker(
         exception_class = type(exception).__name__
         status = "infrastructure_error" if _infrastructure_error(exception) else "error"
         error = f"{type(exception).__name__}: {exception}"
-    prompt_tokens, completion_tokens, total_tokens = _usage(recorder)
-    api_call_count, retry_count, response_retry_count = _call_counts(recorder)
-    return ApproachOutcome(
-        status=status,
+    return _SingleAgentCoreResult(
+        recorder=recorder,
+        execution_directory=execution_directory,
+        staged_files=staged_files,
+        runner=runner,
+        execution=execution,
+        source=source,
         candidate=candidate,
+        status=status,
+        error=error,
+        exception_class=exception_class,
+        local_repairs=local_repairs,
+    )
+
+
+def _single_agent_outcome(
+    core: _SingleAgentCoreResult,
+    *,
+    checker_decisions: list[str] | None = None,
+    checker_repairs: int = 0,
+) -> ApproachOutcome:
+    """Convert shared-core facts to an externally reportable outcome."""
+    prompt_tokens, completion_tokens, total_tokens = _usage(core.recorder)
+    api_call_count, retry_count, response_retry_count = _call_counts(core.recorder)
+    return ApproachOutcome(
+        status=core.status,
+        candidate=core.candidate,
         api_call_count=api_call_count,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         transport_retry_count=retry_count,
         response_retry_count=response_retry_count,
-        execution_exit_code=execution.exit_code if execution else None,
-        timed_out=execution.timed_out if execution else False,
-        generated_script_count=(
-            len(list(execution_directory.glob("generated_code_v*.py")))
+        execution_exit_code=core.execution.exit_code if core.execution else None,
+        timed_out=core.execution.timed_out if core.execution else False,
+        generated_script_count=len(
+            list(core.execution_directory.glob("generated_code_v*.py"))
         ),
-        local_repair_count=local_repairs,
+        local_repair_count=core.local_repairs,
         global_replan_count=0,
         global_checker_repair_count=checker_repairs,
-        run_error=error,
+        run_error=core.error,
         error_category=(
             "provider_response"
-            if _provider_response_error(exception_class)
+            if _provider_response_error(core.exception_class)
             else "transport_api"
-            if status == "infrastructure_error"
+            if core.status == "infrastructure_error"
             else "python_policy"
-            if status == "python_policy_failure"
+            if core.status == "python_policy_failure"
             else None
         ),
-        exception_class=(exception_class if status == "infrastructure_error" else None),
-        verifier_decisions=checker_decisions,
+        exception_class=(
+            core.exception_class if core.status == "infrastructure_error" else None
+        ),
+        verifier_decisions=checker_decisions or [],
     )
+
+
+def run_single_agent_checker(
+    *,
+    public: PublicTaskView,
+    model: RoleModel,
+    run_directory: Path,
+    config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
+) -> ApproachOutcome:
+    """Run one iterative code agent and exactly one independent final checker."""
+    core = _run_iterative_single_agent_core(
+        public=public,
+        model=model,
+        run_directory=run_directory,
+        config=config,
+        progress=progress,
+    )
+    if core.status != "completed" or core.candidate is None or core.execution is None:
+        return _single_agent_outcome(core)
+    checker_decisions: list[str] = []
+    checker_repairs = 0
+    try:
+        checker_raw = core.recorder.generate_structured(
+            role="final_checker",
+            messages=build_final_checker_messages(
+                public=public,
+                candidate=core.candidate,
+                execution=core.execution.model_dump(mode="json"),
+            ),
+            schema_name="single_agent_final_checker",
+            schema=FinalCheckerOutput.model_json_schema(),
+        )
+        (core.execution_directory / "final_checker_response.json").write_text(
+            checker_raw, encoding="utf-8"
+        )
+        checker = FinalCheckerOutput.model_validate_json(checker_raw)
+        checker_decisions = [checker.decision]
+        if checker.decision == "REPAIR":
+            checker_repairs = 1
+            repaired_raw = core.recorder.generate_structured(
+                role="single_agent",
+                messages=build_single_agent_checker_repair_messages(
+                    public=public,
+                    source=core.source,
+                    execution=core.execution,
+                    feedback=checker.feedback,
+                    repair_scope=checker.repair_scope,
+                    staged_files=core.staged_files,
+                    execution_directory=core.execution_directory,
+                ),
+                schema_name="single_agent_checker_python_repair",
+                schema=PythonRepair.model_json_schema(),
+            )
+            (core.execution_directory / "final_checker_python_repair.json").write_text(
+                repaired_raw, encoding="utf-8"
+            )
+            repaired = PythonRepair.model_validate_json(repaired_raw)
+            core.source = repaired.source()
+            core.execution = core.runner.run(
+                code=core.source,
+                goal_directory=core.execution_directory,
+                allowed_files=core.staged_files,
+                version=core.local_repairs + 2,
+            )
+            if not core.execution.success:
+                core.candidate = None
+                core.status = _single_agent_status(core.execution)
+                core.error = core.execution.error
+            else:
+                core.candidate = core.execution.result
+                _validate_against_public_schema(core.candidate, public.answer_schema)
+        if core.execution.success:
+            _save_json(run_directory / "candidate.json", core.candidate)
+            core.status = "completed"
+            core.error = None
+    except (ValueError, ValidationError) as exception:
+        core.candidate = None
+        core.status = "invalid_json"
+        core.error = f"{type(exception).__name__}: {exception}"
+    except Exception as exception:
+        core.candidate = None
+        core.exception_class = type(exception).__name__
+        core.status = (
+            "infrastructure_error" if _infrastructure_error(exception) else "error"
+        )
+        core.error = f"{type(exception).__name__}: {exception}"
+    return _single_agent_outcome(
+        core, checker_decisions=checker_decisions, checker_repairs=checker_repairs
+    )
+
+
+def run_single_agent(
+    *,
+    public: PublicTaskView,
+    model: RoleModel,
+    run_directory: Path,
+    config: BenchmarkConfig,
+    progress: ProgressCallback | None = None,
+) -> ApproachOutcome:
+    """Run the low architecture: shared analysis core with no model checker."""
+    core = _run_iterative_single_agent_core(
+        public=public,
+        model=model,
+        run_directory=run_directory,
+        config=config,
+        progress=progress,
+    )
+    if core.status == "completed" and core.candidate is not None:
+        _save_json(run_directory / "candidate.json", core.candidate)
+    return _single_agent_outcome(core)
 
 
 def _profile_scalar_type(values: list[str]) -> str:
@@ -1210,6 +1313,14 @@ def run_approach(
         )
     elif approach == "one_shot_code":
         outcome = run_one_shot_code(
+            public=public,
+            model=model,
+            run_directory=run_directory,
+            config=config,
+            progress=progress,
+        )
+    elif approach == "single_agent":
+        outcome = run_single_agent(
             public=public,
             model=model,
             run_directory=run_directory,
