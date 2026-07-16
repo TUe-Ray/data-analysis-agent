@@ -1,0 +1,13 @@
+Analyze the supplied synthetic longitudinal study and estimate descriptive
+treatment response for study arms A and B.
+
+Use all supplied protocol, amendment, dictionary, codebook, crosswalk, and raw
+data files. The protocol amendment supersedes conflicting rules in the base
+protocol. Determine an appropriate analysis plan yourself.
+
+Make the analysis auditable by retaining useful intermediate tables for the
+normalized subject cohort, valid joined visits, selected baseline records,
+selected follow-up records, and final analysis cohort.
+
+Produce a complete auditable result matching the supplied JSON answer schema.
+Use only public files. Do not make causal claims or run a hypothesis test.

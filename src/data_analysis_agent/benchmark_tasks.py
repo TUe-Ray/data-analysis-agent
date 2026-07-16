@@ -17,6 +17,52 @@ class BenchmarkTaskError(ValueError):
     """Raised when a public/private benchmark task package is malformed."""
 
 
+def _load_public_files(
+    public_root: Path, task_config: dict[str, object], task_id: str
+) -> tuple[list[str], dict[str, str]]:
+    """Load an explicit public manifest or the legacy ``public/data`` tree."""
+    declared = task_config.get("public_files")
+    if declared is None:
+        data_root = public_root / "data"
+        paths = sorted(path for path in data_root.rglob("*") if path.is_file())
+        names = [str(path.relative_to(data_root)) for path in paths]
+    else:
+        if (
+            not isinstance(declared, list)
+            or not declared
+            or any(not isinstance(item, str) for item in declared)
+        ):
+            raise BenchmarkTaskError("public_files must be a non-empty string list")
+        names = list(declared)
+        if len(names) != len(set(names)):
+            raise BenchmarkTaskError("public_files contains duplicate paths")
+        paths = []
+        root = public_root.resolve()
+        for name in names:
+            relative = Path(name)
+            candidate = (public_root / relative).resolve()
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or ".." in relative.parts
+                or root not in candidate.parents
+                or not candidate.is_file()
+            ):
+                raise BenchmarkTaskError(f"Unsafe or missing public file: {name!r}")
+            paths.append(candidate)
+    if not paths:
+        raise BenchmarkTaskError(f"Task {task_id} has no public data files")
+    try:
+        return names, {
+            name: path.read_text(encoding="utf-8")
+            for name, path in zip(names, paths, strict=True)
+        }
+    except (OSError, UnicodeError) as error:
+        raise BenchmarkTaskError(
+            f"Could not read task public files: {error}"
+        ) from error
+
+
 def _load_prompt_variants(
     public_root: Path, task_config: dict[str, object], requested_variant: str | None
 ) -> tuple[str, str]:
@@ -83,17 +129,7 @@ def load_benchmark_task(
             f"Could not load public task {task_id}: {error}"
         ) from error
     variant, prompt = _load_prompt_variants(public_root, task_config, prompt_variant)
-    data_root = public_root / "data"
-    data_paths = sorted(path for path in data_root.rglob("*") if path.is_file())
-    if not data_paths:
-        raise BenchmarkTaskError(f"Task {task_id} has no public data files")
-    data_contents: dict[str, str] = {}
-    try:
-        for path in data_paths:
-            name = str(path.relative_to(data_root))
-            data_contents[name] = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise BenchmarkTaskError(f"Could not read task data: {error}") from error
+    data_files, data_contents = _load_public_files(public_root, task_config, task_id)
 
     grader = private_root / "grader.py"
     reference = private_root / "reference.json"
@@ -103,7 +139,7 @@ def load_benchmark_task(
         task_id=task_id,
         prompt_variant=variant,
         prompt=prompt,
-        data_files=list(data_contents),
+        data_files=data_files,
         data_contents=data_contents,
         answer_schema=task_config["answer_schema"],
         metadata=task_config.get("metadata", {}),
@@ -118,7 +154,7 @@ def load_benchmark_task(
 
 
 def stage_public_task(public: PublicTaskView, destination: Path) -> PublicTaskView:
-    """Copy only in-memory public data into a clean approach directory."""
+    """Copy only manifested in-memory public files into a clean attempt."""
     inputs = destination / "inputs"
     inputs.mkdir(parents=True, exist_ok=False)
     staged_files: list[str] = []

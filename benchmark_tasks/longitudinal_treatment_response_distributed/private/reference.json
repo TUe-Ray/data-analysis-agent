@@ -1,0 +1,285 @@
+{
+  "absolute_tolerance": 0.001,
+  "key_results": {
+    "attrition": {
+      "total_patients": 48,
+      "basic_ineligible": 6,
+      "eligible_after_basic_checks": 42,
+      "excluded_pre_start": 4,
+      "no_valid_baseline": 5,
+      "no_valid_followup": 4,
+      "excluded_post_start_before_or_on_followup": 2,
+      "complete_pairs": 27,
+      "complete_pairs_arm_a": 14,
+      "complete_pairs_arm_b": 13,
+      "exact_duplicate_visit_rows_removed": 12,
+      "invalid_or_missing_visit_rows_excluded": 93
+    },
+    "arm_statistics": {
+      "A": {
+        "n": 14,
+        "mean_baseline": 100.015,
+        "mean_followup": 95.558,
+        "mean_change": -4.457,
+        "sample_sd_change": 1.273,
+        "sample_se_change": 0.34
+      },
+      "B": {
+        "n": 13,
+        "mean_baseline": 115.118,
+        "mean_followup": 105.949,
+        "mean_change": -9.169,
+        "sample_sd_change": 1.266,
+        "sample_se_change": 0.351
+      }
+    },
+    "between_arm_comparison": {
+      "difference_in_mean_change_b_minus_a": -4.712
+    },
+    "selected_pairs": [
+      {
+        "patient_id": "P001",
+        "arm": "A",
+        "baseline_record_id": "V_P001_B_HIGHQ",
+        "followup_record_id": "V_P001_F_D33_HIGHQ",
+        "baseline_value": 92.43,
+        "followup_value": 88.78,
+        "change": -3.65
+      },
+      {
+        "patient_id": "P002",
+        "arm": "A",
+        "baseline_record_id": "V_P002_B_HIGHQ",
+        "followup_record_id": "V_P002_F_D37_HIGHQ",
+        "baseline_value": 93.76,
+        "followup_value": 89.51,
+        "change": -4.25
+      },
+      {
+        "patient_id": "P004",
+        "arm": "A",
+        "baseline_record_id": "V_P004_B_HIGHQ",
+        "followup_record_id": "V_P004_F_D37_HIGHQ",
+        "baseline_value": 94.02,
+        "followup_value": 87.82,
+        "change": -6.2
+      },
+      {
+        "patient_id": "P006",
+        "arm": "A",
+        "baseline_record_id": "V_P006_B_HIGHQ",
+        "followup_record_id": "V_P006_F_D37_HIGHQ",
+        "baseline_value": 96.68,
+        "followup_value": 92.78,
+        "change": -3.9
+      },
+      {
+        "patient_id": "P008",
+        "arm": "A",
+        "baseline_record_id": "V_P008_B_HIGHQ",
+        "followup_record_id": "V_P008_F_D37_HIGHQ",
+        "baseline_value": 96.94,
+        "followup_value": 91.84,
+        "change": -5.1
+      },
+      {
+        "patient_id": "P009",
+        "arm": "A",
+        "baseline_record_id": "V_P009_B_HIGHQ",
+        "followup_record_id": "V_P009_F_D33_HIGHQ",
+        "baseline_value": 98.27,
+        "followup_value": 91.82,
+        "change": -6.45
+      },
+      {
+        "patient_id": "P010",
+        "arm": "A",
+        "baseline_record_id": "V_P010_B_HIGHQ",
+        "followup_record_id": "V_P010_F_D37_HIGHQ",
+        "baseline_value": 99.6,
+        "followup_value": 96.8,
+        "change": -2.8
+      },
+      {
+        "patient_id": "P012",
+        "arm": "A",
+        "baseline_record_id": "V_P012_B_HIGHQ",
+        "followup_record_id": "V_P012_F_D37_HIGHQ",
+        "baseline_value": 99.86,
+        "followup_value": 95.11,
+        "change": -4.75
+      },
+      {
+        "patient_id": "P013",
+        "arm": "A",
+        "baseline_record_id": "V_P013_B_HIGHQ",
+        "followup_record_id": "V_P013_F_D33_HIGHQ",
+        "baseline_value": 101.19,
+        "followup_value": 95.84,
+        "change": -5.35
+      },
+      {
+        "patient_id": "P015",
+        "arm": "A",
+        "baseline_record_id": "V_P015_B_HIGHQ",
+        "followup_record_id": "V_P015_F_D33_HIGHQ",
+        "baseline_value": 103.85,
+        "followup_value": 100.8,
+        "change": -3.05
+      },
+      {
+        "patient_id": "P017",
+        "arm": "A",
+        "baseline_record_id": "V_P017_B_HIGHQ",
+        "followup_record_id": "V_P017_F_D33_HIGHQ",
+        "baseline_value": 104.11,
+        "followup_value": 99.86,
+        "change": -4.25
+      },
+      {
+        "patient_id": "P019",
+        "arm": "A",
+        "baseline_record_id": "V_P019_B_HIGHQ",
+        "followup_record_id": "V_P019_F_D33_HIGHQ",
+        "baseline_value": 106.77,
+        "followup_value": 100.57,
+        "change": -6.2
+      },
+      {
+        "patient_id": "P020",
+        "arm": "A",
+        "baseline_record_id": "V_P020_B_HIGHQ",
+        "followup_record_id": "V_P020_F_D37_HIGHQ",
+        "baseline_value": 105.7,
+        "followup_value": 103.15,
+        "change": -2.55
+      },
+      {
+        "patient_id": "P021",
+        "arm": "A",
+        "baseline_record_id": "V_P021_B_HIGHQ",
+        "followup_record_id": "V_P021_F_D33_HIGHQ",
+        "baseline_value": 107.03,
+        "followup_value": 103.13,
+        "change": -3.9
+      },
+      {
+        "patient_id": "P022",
+        "arm": "B",
+        "baseline_record_id": "V_P022_B_HIGHQ",
+        "followup_record_id": "V_P022_F_D37_HIGHQ",
+        "baseline_value": 108.36,
+        "followup_value": 99.36,
+        "change": -9.0
+      },
+      {
+        "patient_id": "P023",
+        "arm": "B",
+        "baseline_record_id": "V_P023_B_HIGHQ",
+        "followup_record_id": "V_P023_F_D33_HIGHQ",
+        "baseline_value": 109.69,
+        "followup_value": 100.04,
+        "change": -9.65
+      },
+      {
+        "patient_id": "P025",
+        "arm": "B",
+        "baseline_record_id": "V_P025_B_HIGHQ",
+        "followup_record_id": "V_P025_F_D33_HIGHQ",
+        "baseline_value": 109.95,
+        "followup_value": 102.85,
+        "change": -7.1
+      },
+      {
+        "patient_id": "P027",
+        "arm": "B",
+        "baseline_record_id": "V_P027_B_HIGHQ",
+        "followup_record_id": "V_P027_F_D33_HIGHQ",
+        "baseline_value": 112.61,
+        "followup_value": 103.31,
+        "change": -9.3
+      },
+      {
+        "patient_id": "P029",
+        "arm": "B",
+        "baseline_record_id": "V_P029_B_HIGHQ",
+        "followup_record_id": "V_P029_F_D33_HIGHQ",
+        "baseline_value": 112.87,
+        "followup_value": 102.27,
+        "change": -10.6
+      },
+      {
+        "patient_id": "P030",
+        "arm": "B",
+        "baseline_record_id": "V_P030_B_HIGHQ",
+        "followup_record_id": "V_P030_F_D37_HIGHQ",
+        "baseline_value": 114.2,
+        "followup_value": 106.8,
+        "change": -7.4
+      },
+      {
+        "patient_id": "P031",
+        "arm": "B",
+        "baseline_record_id": "V_P031_B_HIGHQ",
+        "followup_record_id": "V_P031_F_D33_HIGHQ",
+        "baseline_value": 115.53,
+        "followup_value": 107.48,
+        "change": -8.05
+      },
+      {
+        "patient_id": "P032",
+        "arm": "B",
+        "baseline_record_id": "V_P032_B_HIGHQ",
+        "followup_record_id": "V_P032_F_D37_HIGHQ",
+        "baseline_value": 114.46,
+        "followup_value": 105.76,
+        "change": -8.7
+      },
+      {
+        "patient_id": "P034",
+        "arm": "B",
+        "baseline_record_id": "V_P034_B_HIGHQ",
+        "followup_record_id": "V_P034_F_D37_HIGHQ",
+        "baseline_value": 117.12,
+        "followup_value": 106.22,
+        "change": -10.9
+      },
+      {
+        "patient_id": "P036",
+        "arm": "B",
+        "baseline_record_id": "V_P036_B_HIGHQ",
+        "followup_record_id": "V_P036_F_D37_HIGHQ",
+        "baseline_value": 117.38,
+        "followup_value": 109.03,
+        "change": -8.35
+      },
+      {
+        "patient_id": "P038",
+        "arm": "B",
+        "baseline_record_id": "V_P038_B_HIGHQ",
+        "followup_record_id": "V_P038_F_D37_HIGHQ",
+        "baseline_value": 120.04,
+        "followup_value": 110.39,
+        "change": -9.65
+      },
+      {
+        "patient_id": "P039",
+        "arm": "B",
+        "baseline_record_id": "V_P039_B_HIGHQ",
+        "followup_record_id": "V_P039_F_D33_HIGHQ",
+        "baseline_value": 121.37,
+        "followup_value": 110.17,
+        "change": -11.2
+      },
+      {
+        "patient_id": "P042",
+        "arm": "B",
+        "baseline_record_id": "V_P042_B_HIGHQ",
+        "followup_record_id": "V_P042_F_D37_HIGHQ",
+        "baseline_value": 122.96,
+        "followup_value": 113.66,
+        "change": -9.3
+      }
+    ]
+  }
+}

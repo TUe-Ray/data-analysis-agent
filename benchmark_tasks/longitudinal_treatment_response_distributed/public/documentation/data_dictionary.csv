@@ -1,0 +1,22 @@
+file_name,physical_column,semantic_meaning,data_type,join_key_or_relation,units,missing_value_behavior
+subjects.csv,subject_key,source-system subject identifier,string,joins subject_crosswalk.source_subject_key,none,missing invalidates identity
+subjects.csv,age_years,age at index date,number,subject row,years,missing or nonnumeric fails basic eligibility
+subjects.csv,consent_code,coded informed-consent response,string,value_codebook consent domain,none,missing fails basic eligibility
+subjects.csv,assigned_group_code,coded assigned study arm,string,value_codebook treatment_arm domain,none,missing or unmapped fails basic eligibility
+subjects.csv,index_date,treatment start and relative day zero,ISO date,subject row,date,missing or invalid fails basic eligibility
+subjects.csv,recruiting_site_code,coded recruiting site,string,value_codebook site domain,none,not used for eligibility or analysis
+visit_catalog.csv,encounter_key,technical visit row key,string,joins measurements.encounter_key,none,must resolve to exactly one measurement row
+visit_catalog.csv,source_record_id,scientific visit record identifier,string,reported as selected baseline or follow-up record ID,none,missing visit identifier is invalid
+visit_catalog.csv,source_subject_key,source-system subject identifier,string,joins subject_crosswalk.source_subject_key,none,must resolve through crosswalk
+visit_catalog.csv,observed_at,measurement observation date,ISO date,visit row,date,missing or invalid makes visit invalid
+visit_catalog.csv,measurement_status_code,coded measurement review status,string,value_codebook measurement_status domain,none,missing or unaccepted makes visit invalid
+visit_catalog.csv,origin_system_code,coded originating system,string,value_codebook source_system domain,none,retained in exact-logical-duplicate definition
+measurements.csv,encounter_key,technical visit row key,string,joins visit_catalog.encounter_key,none,must resolve to exactly one visit row
+measurements.csv,response_value,longitudinal response measurement,number,encounter row,response units,missing nonnumeric or nonfinite makes visit invalid
+measurements.csv,qc_score,quality-control score used for tie breaking,number,encounter row,score points,missing nonnumeric or nonfinite makes visit invalid
+exclusion_events.csv,event_key,source exclusion-event identifier,string,event row,none,missing identifier does not alter date semantics
+exclusion_events.csv,source_subject_key,source-system subject identifier,string,joins subject_crosswalk.source_subject_key,none,must resolve through crosswalk
+exclusion_events.csv,event_effective_date,date exclusion takes effect,ISO date,event row,date,interpret relative to index and selected follow-up dates
+exclusion_events.csv,event_code,coded exclusion reason,string,value_codebook exclusion_event domain,none,documented codes are exclusion records
+subject_crosswalk.csv,source_subject_key,source-system identifier,string,joins subjects and event or visit sources,none,must be unique
+subject_crosswalk.csv,analysis_subject_id,canonical identifier for analysis and patient_id output,string,one-to-one with source_subject_key,none,must be unique

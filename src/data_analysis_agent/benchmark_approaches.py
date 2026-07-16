@@ -914,9 +914,31 @@ def _profile_scalar_type(values: list[str]) -> str:
 def _agent_input_profile(public: PublicTaskView) -> dict[str, JsonValue]:
     """Summarize public inputs without repeating complete datasets in prompts."""
     files: list[dict[str, JsonValue]] = []
+    declared_documents = public.metadata.get("document_files", [])
+    document_files = {
+        str(name)
+        for name in declared_documents
+        if isinstance(declared_documents, list) and isinstance(name, str)
+    }
     for path in public.data_files:
         key = _content_key(public, path)
         content = public.data_contents[key]
+        display_path = Path(path)
+        public_name = (
+            Path(*display_path.parts[1:]).as_posix()
+            if display_path.parts and display_path.parts[0] == "inputs"
+            else display_path.as_posix()
+        )
+        if public_name in document_files:
+            files.append(
+                {
+                    "filename": path,
+                    "format": Path(path).suffix.lower().lstrip(".") or "text",
+                    "character_count": len(content),
+                    "content": content,
+                }
+            )
+            continue
         if Path(path).suffix.lower() != ".csv":
             files.append(
                 {

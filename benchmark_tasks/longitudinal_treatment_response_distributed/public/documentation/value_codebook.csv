@@ -1,0 +1,19 @@
+domain,physical_value,semantic_value,analysis_use
+treatment_arm,ARM_A,A,eligible normalized arm A
+treatment_arm,ARM_B,B,eligible normalized arm B
+treatment_arm,ARM_OTHER,other,ineligible arm value
+consent,CONSENT_Y,yes,passes consent criterion
+consent,CONSENT_N,no,fails consent criterion
+measurement_status,STATUS_VALID,valid,accepted by base protocol and amendment
+measurement_status,STATUS_REVIEWED,reviewed,accepted by Amendment 01
+measurement_status,STATUS_SENSOR_FAIL,invalid sensor,not accepted
+measurement_status,STATUS_REJECTED,rejected,not accepted
+source_system,SOURCE_EDC,electronic data capture,provenance only
+source_system,SOURCE_MANUAL,manual entry,provenance only
+exclusion_event,EXCL_CONTRAINDICATION,pre-existing contraindication,exclusion record
+exclusion_event,EXCL_DISCONTINUATION,protocol discontinuation,exclusion record
+exclusion_event,EXCL_FOLLOWUP_NOTE,later follow-up note,exclusion record
+exclusion_event,EXCL_ADMINISTRATIVE,late administrative exclusion,exclusion record
+site,SITE_CENTRAL,Central,recruiting-site metadata only
+site,SITE_NORTH,North,recruiting-site metadata only
+site,SITE_SOUTH,South,recruiting-site metadata only

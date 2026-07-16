@@ -1,0 +1,248 @@
+{
+  "public_files": [
+    "protocol/study_protocol.md",
+    "protocol/protocol_amendment_01.md",
+    "documentation/data_dictionary.csv",
+    "documentation/value_codebook.csv",
+    "data/subjects.csv",
+    "data/visit_catalog.csv",
+    "data/measurements.csv",
+    "data/exclusion_events.csv",
+    "data/subject_crosswalk.csv"
+  ],
+  "answer_schema": {
+    "type": "object",
+    "required": [
+      "status",
+      "answer",
+      "key_results",
+      "limitations"
+    ],
+    "properties": {
+      "status": {
+        "enum": [
+          "completed",
+          "completed_with_limitations"
+        ]
+      },
+      "answer": {
+        "type": "string"
+      },
+      "key_results": {
+        "type": "object",
+        "required": [
+          "attrition",
+          "arm_statistics",
+          "between_arm_comparison",
+          "selected_pairs"
+        ],
+        "properties": {
+          "attrition": {
+            "type": "object",
+            "required": [
+              "total_patients",
+              "basic_ineligible",
+              "eligible_after_basic_checks",
+              "excluded_pre_start",
+              "no_valid_baseline",
+              "no_valid_followup",
+              "excluded_post_start_before_or_on_followup",
+              "complete_pairs",
+              "complete_pairs_arm_a",
+              "complete_pairs_arm_b",
+              "exact_duplicate_visit_rows_removed",
+              "invalid_or_missing_visit_rows_excluded"
+            ],
+            "properties": {
+              "total_patients": {
+                "type": "integer"
+              },
+              "basic_ineligible": {
+                "type": "integer"
+              },
+              "eligible_after_basic_checks": {
+                "type": "integer"
+              },
+              "excluded_pre_start": {
+                "type": "integer"
+              },
+              "no_valid_baseline": {
+                "type": "integer"
+              },
+              "no_valid_followup": {
+                "type": "integer"
+              },
+              "excluded_post_start_before_or_on_followup": {
+                "type": "integer"
+              },
+              "complete_pairs": {
+                "type": "integer"
+              },
+              "complete_pairs_arm_a": {
+                "type": "integer"
+              },
+              "complete_pairs_arm_b": {
+                "type": "integer"
+              },
+              "exact_duplicate_visit_rows_removed": {
+                "type": "integer"
+              },
+              "invalid_or_missing_visit_rows_excluded": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          },
+          "arm_statistics": {
+            "type": "object",
+            "required": [
+              "A",
+              "B"
+            ],
+            "properties": {
+              "A": {
+                "type": "object",
+                "required": [
+                  "n",
+                  "mean_baseline",
+                  "mean_followup",
+                  "mean_change",
+                  "sample_sd_change",
+                  "sample_se_change"
+                ],
+                "properties": {
+                  "n": {
+                    "type": "integer"
+                  },
+                  "mean_baseline": {
+                    "type": "number"
+                  },
+                  "mean_followup": {
+                    "type": "number"
+                  },
+                  "mean_change": {
+                    "type": "number"
+                  },
+                  "sample_sd_change": {
+                    "type": "number"
+                  },
+                  "sample_se_change": {
+                    "type": "number"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "B": {
+                "type": "object",
+                "required": [
+                  "n",
+                  "mean_baseline",
+                  "mean_followup",
+                  "mean_change",
+                  "sample_sd_change",
+                  "sample_se_change"
+                ],
+                "properties": {
+                  "n": {
+                    "type": "integer"
+                  },
+                  "mean_baseline": {
+                    "type": "number"
+                  },
+                  "mean_followup": {
+                    "type": "number"
+                  },
+                  "mean_change": {
+                    "type": "number"
+                  },
+                  "sample_sd_change": {
+                    "type": "number"
+                  },
+                  "sample_se_change": {
+                    "type": "number"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "between_arm_comparison": {
+            "type": "object",
+            "required": [
+              "difference_in_mean_change_b_minus_a"
+            ],
+            "properties": {
+              "difference_in_mean_change_b_minus_a": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": false
+          },
+          "selected_pairs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "patient_id",
+                "arm",
+                "baseline_record_id",
+                "followup_record_id",
+                "baseline_value",
+                "followup_value",
+                "change"
+              ],
+              "properties": {
+                "patient_id": {
+                  "type": "string"
+                },
+                "arm": {
+                  "enum": [
+                    "A",
+                    "B"
+                  ]
+                },
+                "baseline_record_id": {
+                  "type": "string"
+                },
+                "followup_record_id": {
+                  "type": "string"
+                },
+                "baseline_value": {
+                  "type": "number"
+                },
+                "followup_value": {
+                  "type": "number"
+                },
+                "change": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "limitations": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "metadata": {
+    "description": "Distributed-specification longitudinal cohort reconstruction",
+    "domain": "clinical data analysis",
+    "difficulty": "distributed multi-step workflow",
+    "source_task_id": "longitudinal_treatment_response",
+    "document_files": [
+      "protocol/study_protocol.md",
+      "protocol/protocol_amendment_01.md",
+      "documentation/data_dictionary.csv",
+      "documentation/value_codebook.csv"
+    ]
+  }
+}

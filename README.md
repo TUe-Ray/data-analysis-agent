@@ -405,6 +405,20 @@ benchmark_runs/<run_id>/single_agent/longitudinal_treatment_response/requirement
 `metrics_by_prompt_variant[variant][approach]`; when multiple variants are run,
 the terminal summary prints one table per variant.
 
+The separate `longitudinal_treatment_response_distributed` interview task keeps
+the same scientific reference while distributing rules across a protocol,
+governing amendment, dictionaries, crosswalk, and five normalized tables.
+Regenerate or validate it with:
+
+```bash
+python scripts/build_distributed_longitudinal_task.py --write
+python scripts/build_distributed_longitudinal_task.py --check
+```
+
+See [the distributed-specification demo report](docs/distributed_spec_demo.md)
+for its provenance, artifact-flow design, validation result, limitations, and
+live commands.
+
 Internal Verifier approval is not the benchmark grade. Ground truth, reference
 values, grader code, and private grading metadata are isolated from every
 model-facing component through a `PublicTaskView`; only public files are staged.

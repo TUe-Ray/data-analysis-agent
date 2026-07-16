@@ -105,7 +105,10 @@ def _create_benchmark_run_directory(
 
 def _offline_model_factory(approach: Approach, public: PublicTaskView) -> RoleModel:
     """Return deterministic smoke responses without credentials or network access."""
-    if public.task_id == "longitudinal_treatment_response":
+    if public.task_id in {
+        "longitudinal_treatment_response",
+        "longitudinal_treatment_response_distributed",
+    }:
         # This is deliberately only a schema-valid offline fixture.  It lets the
         # 3x2 harness exercise role boundaries and external grading without
         # embedding a private reference answer in any model-facing material.
