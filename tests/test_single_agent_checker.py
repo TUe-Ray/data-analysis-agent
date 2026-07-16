@@ -104,6 +104,9 @@ def test_final_checker_repair_regenerates_and_executes_python(tmp_path: Path) ->
     assert outcome.global_checker_repair_count == 1
     assert [call.role for call in model.calls].count("final_checker") == 1
     assert outcome.global_replan_count == 0
+    repair_prompt = model.calls[-1].messages[0]["content"]
+    assert "complete standalone program" in repair_prompt
+    assert "never a patch, diff, or changed-line fragment" in repair_prompt
 
 
 def test_invalid_checker_repair_fails_without_a_second_repair(tmp_path: Path) -> None:
@@ -179,6 +182,20 @@ def test_single_agent_uses_resolved_staged_file_path_from_its_execution_cwd(
     prompt = model.calls[0].messages[1]["content"]
     assert str(staged) in prompt
     assert "Relative input paths are invalid" in prompt
+    assert "bare path as a code line" in model.calls[0].messages[0]["content"]
+    assert "semantic\ncolumn names" in model.calls[0].messages[0]["content"]
+    assert "before applying that transformation" in model.calls[0].messages[0][
+        "content"
+    ]
+    assert "len(original_rows) - len(deduplicated_rows)" in model.calls[0].messages[
+        0
+    ]["content"]
+    checker_prompt = model.calls[1].messages[1]["content"]
+    assert "BEGIN FILE: data.csv" in checker_prompt
+    assert "value\n1" in checker_prompt
+    checker_system_prompt = model.calls[1].messages[0]["content"]
+    assert "matching\nexecution output alone is not evidence" in checker_system_prompt
+    assert "raw_row_count - deduplicated_row_count" in checker_system_prompt
     rejected = LocalPythonRunner().run(
         code=(
             "import pandas as pd\n"

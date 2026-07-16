@@ -64,16 +64,27 @@ Solve the complete public task by returning one PythonGeneration JSON object. It
 code_lines must be one physical, comment-free Python source line each. Read only
 the stated staged paths, write only inside the assigned execution directory, and
 assign the complete public answer-schema object to module-level __agent_result__.
-The result must contain only JSON-compatible values. Use concise code; a trusted
-runner owns result serialization. Mechanical failures may receive a bounded repair,
-but there is no Planner or per-goal Verifier in this approach."""
+Every staged path must be quoted inside a valid Python expression; never emit a
+bare path as a code line. The result must contain only JSON-compatible values.
+Use concise code; a trusted runner owns result serialization. Mechanical failures
+may receive a bounded repair,
+but there is no Planner or per-goal Verifier in this approach. Use the semantic
+column names specified by the task; never substitute a positional first-column
+selection unless the task explicitly requests it. When reporting rows removed by
+filtering or deduplication, record the count before applying that transformation.
+For exact duplicate removal, use len(original_rows) - len(deduplicated_rows), then
+continue analysis with the deduplicated rows."""
 
 FINAL_CHECKER_SYSTEM_PROMPT = """You are an independent final completeness
 checker. Assess the public task, public answer schema, candidate answer, factual
 execution result, artifact summary, and limitations. Return exactly one
 FinalCheckerOutput JSON object. Return PASS only if the candidate is complete and
-supported, with repair_scope="none". Return REPAIR with concise actionable
-feedback and repair_scope="format_only" for representation-only issues or
+supported by an independent cross-check of the supplied public data; matching
+execution output alone is not evidence of correctness. Verify explicit sequential
+rules and removal counts from the raw input before passing. For exact duplicate
+removal, independently check raw_row_count - deduplicated_row_count. Return REPAIR with
+concise actionable feedback and repair_scope="format_only" for representation-only
+issues or
 "rerun_analysis" for any scientific/data-analysis correction. You do not write
 code and are called exactly once."""
 
@@ -149,6 +160,14 @@ def build_final_checker_messages(
     execution: dict[str, JsonValue],
 ) -> list[dict[str, str]]:
     """Keep final checking independent from the single-agent role history."""
+    input_sections = []
+    for name in public.data_files:
+        key = _content_key(public, name)
+        input_sections.append(
+            f"----- BEGIN FILE: {Path(name).name} -----\n"
+            f"{public.data_contents[key].rstrip()}\n"
+            f"----- END FILE: {Path(name).name} -----"
+        )
     return [
         {"role": "system", "content": FINAL_CHECKER_SYSTEM_PROMPT},
         {
@@ -156,6 +175,8 @@ def build_final_checker_messages(
             "content": (
                 f"Task prompt:\n{public.prompt}\n\n"
                 f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                "Public input data (cross-check numerical claims against these "
+                "files):\n" + "\n\n".join(input_sections) + "\n\n"
                 f"Final candidate answer:\n{json.dumps(candidate)}\n\n"
                 f"Factual execution result:\n{json.dumps(execution)}\n\n"
                 "Artifacts and limitations: no unregistered artifacts; the candidate's "
@@ -207,7 +228,9 @@ def build_single_agent_checker_repair_messages(
             "role": "system",
             "content": (
                 "Regenerate executable analysis Python, not an answer-only JSON "
-                "rewrite. "
+                "rewrite. The code_lines replace the entire previous program: "
+                "return a complete standalone program, never a patch, diff, or "
+                "changed-line fragment. "
                 "Return exactly one PythonRepair JSON object. The repaired program is "
                 "executed and its __agent_result__ is the only candidate that can "
                 "be used."
@@ -668,6 +691,7 @@ def run_single_agent_checker(
                         error=previous.error if previous else error,
                         staged_file_paths=[str(path) for path in staged_files],
                         goal_directory=str(execution_directory),
+                        input_context=_agent_input_context(public),
                         repair_history=[],
                     ),
                     schema_name="single_agent_python_repair",

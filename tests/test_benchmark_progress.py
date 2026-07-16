@@ -117,6 +117,44 @@ def test_progress_distinguishes_repair_and_replan_and_sanitizes_errors() -> None
     assert "\x1b" not in output
 
 
+def test_elapsed_timer_is_visible_and_freezes_when_run_finishes() -> None:
+    now = [100.0]
+    stream = StringIO()
+    renderer = BenchmarkProgressRenderer(
+        stream=stream,
+        interactive=False,
+        clock=lambda: now[0],
+    )
+    _start(renderer)
+    now[0] = 125.0
+    renderer.emit({"type": "activity", "message": "Still running"})
+
+    assert "Elapsed: 00:00:25" in stream.getvalue()
+
+    renderer.emit({"type": "benchmark_finished"})
+    now[0] = 999.0
+    renderer.emit({"type": "activity", "message": "After finish"})
+    assert stream.getvalue().count("Elapsed: 00:00:25") >= 2
+    assert "Elapsed: 00:14:59" not in stream.getvalue()
+    renderer.close()
+
+
+def test_interactive_redraw_includes_elapsed_timer() -> None:
+    now = [10.0]
+    stream = StringIO()
+    renderer = BenchmarkProgressRenderer(
+        stream=stream,
+        interactive=True,
+        clock=lambda: now[0],
+    )
+    _start(renderer)
+    now[0] = 71.0
+    renderer.emit({"type": "activity", "message": "Waiting on model"})
+
+    assert "Elapsed: 00:01:01" in stream.getvalue()
+    renderer.close()
+
+
 def test_interactive_progress_redraws_current_step() -> None:
     renderer, stream = _renderer(interactive=True)
     _start(renderer)

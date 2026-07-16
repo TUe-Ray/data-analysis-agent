@@ -456,6 +456,7 @@ def _trusted_runner_source(*, script_path: Path, result_path: Path) -> str:
     return f'''import json
 import runpy
 import sys
+from datetime import date, datetime, time
 from pathlib import Path
 
 RESULT_MARKER = {RESULT_CONTRACT_MARKER!r}
@@ -464,6 +465,16 @@ RESULT_MARKER = {RESULT_CONTRACT_MARKER!r}
 def fail(message):
     sys.stderr.write(RESULT_MARKER + " " + message + "\\n")
     raise SystemExit(86)
+
+
+def json_default(value):
+    if isinstance(value, (date, datetime, time)):
+        return value.isoformat()
+    if type(value).__module__.split(".", 1)[0] == "numpy" and hasattr(value, "item"):
+        scalar = value.item()
+        if scalar is None or isinstance(scalar, (str, int, float, bool)):
+            return scalar
+    raise TypeError(f"unsupported result value type: {{type(value).__name__}}")
 
 
 namespace = runpy.run_path({str(script_path)!r}, run_name="__main__")
@@ -479,6 +490,7 @@ try:
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
+        default=json_default,
     )
 except TypeError:
     fail("result is not JSON-serializable")
@@ -592,7 +604,11 @@ class LocalPythonRunner:
                 "LANG": "C.UTF-8",
             }
             completed = subprocess.run(
-                [sys.executable, "-I", str(runner_path or script_path)],
+                [
+                    sys.executable,
+                    "-I",
+                    str((runner_path or script_path).resolve()),
+                ],
                 cwd=execution_directory,
                 env=environment,
                 capture_output=True,

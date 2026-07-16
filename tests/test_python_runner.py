@@ -378,6 +378,63 @@ def test_debug_and_multiline_stdout_are_not_authoritative(tmp_path: Path) -> Non
     assert "debug after" in result.stdout
 
 
+def test_agent_runner_works_with_relative_goal_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Benchmark output roots may be relative to the process working directory."""
+    monkeypatch.chdir(tmp_path)
+
+    result = LocalPythonRunner().run(
+        code="__agent_result__ = {'value': 7}\n",
+        goal_directory=Path("relative-run/goal"),
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    assert result.result == {"value": 7}
+
+
+def test_runner_serializes_pandas_timestamp_records_as_iso_strings(
+    tmp_path: Path,
+) -> None:
+    result = LocalPythonRunner().run(
+        code=(
+            "import pandas as pd\n"
+            "records = pd.DataFrame({'patient_id': ['P001'], "
+            "'treatment_start_date': ['2026-01-08']})\n"
+            "records['treatment_start_date'] = pd.to_datetime("
+            "records['treatment_start_date'])\n"
+            "__agent_result__ = {'patients': records.to_dict(orient='records')}\n"
+        ),
+        goal_directory=tmp_path / "goal",
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    assert result.result == {
+        "patients": [
+            {"patient_id": "P001", "treatment_start_date": "2026-01-08T00:00:00"}
+        ]
+    }
+
+
+def test_runner_serializes_numpy_scalars_as_json_values(tmp_path: Path) -> None:
+    result = LocalPythonRunner().run(
+        code=(
+            "import numpy as np\n"
+            "__agent_result__ = {'count': np.int64(7), 'mean': np.float64(2.5)}\n"
+        ),
+        goal_directory=tmp_path / "goal",
+        allowed_files=[],
+        version=1,
+    )
+
+    assert result.success
+    assert result.result == {"count": 7, "mean": 2.5}
+
+
 @pytest.mark.parametrize(
     ("code", "message"),
     [

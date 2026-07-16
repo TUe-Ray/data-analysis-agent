@@ -62,7 +62,7 @@ class ModelRefusalError(ProviderResponseError):
 
 
 class MalformedModelResponseError(ProviderResponseError):
-    """Raised for a non-retryable incomplete provider response."""
+    """Raised when a provider never returns usable final response content."""
 
 
 DEFAULT_ORDINARY_OUTPUT_TOKENS = 8192
@@ -337,9 +337,10 @@ class NebiusRoleModel:
         self.last_response_retry_count = 0
         self.last_finish_reason = None
         self.last_provider_attempts = []
+        request_messages = list(messages)
         arguments: dict[str, object] = {
             "model": self._model,
-            "messages": messages,
+            "messages": request_messages,
         }
         if self._temperature is not None:
             arguments["temperature"] = self._temperature
@@ -350,6 +351,7 @@ class NebiusRoleModel:
         if response_format is not None:
             arguments["response_format"] = response_format
         last_diagnostic: dict[str, object] = {}
+        tool_call_correction_added = False
         for response_attempt in range(3):
             response = self._request_with_transport(
                 arguments=arguments,
@@ -372,12 +374,31 @@ class NebiusRoleModel:
             if content is not None:
                 return content
             last_diagnostic = diagnostic
-            if exception_type is not EmptyModelResponseError:
+            retryable = exception_type is EmptyModelResponseError or (
+                exception_type is MalformedModelResponseError
+                and diagnostic["tool_calls"] is True
+            )
+            if not retryable:
                 raise exception_type(self._response_error_message(diagnostic))
             if response_attempt == 2:
-                raise EmptyModelResponseError(
+                raise exception_type(
                     self._response_error_message(diagnostic, attempts=3)
                 )
+            if diagnostic["tool_calls"] is True and not tool_call_correction_added:
+                request_messages = [
+                    *request_messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response attempted an unsupported tool "
+                            "call and provided no final answer. No tools are "
+                            "available. Return the required final response directly "
+                            "and do not make tool calls."
+                        ),
+                    },
+                ]
+                arguments["messages"] = request_messages
+                tool_call_correction_added = True
             self.last_response_retry_count += 1
             time.sleep((0.5, 1.5)[response_attempt])
         raise EmptyModelResponseError(self._response_error_message(last_diagnostic))

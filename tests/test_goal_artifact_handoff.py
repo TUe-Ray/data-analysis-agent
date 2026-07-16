@@ -7,6 +7,7 @@ from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import ScriptedRoleModel
 from data_analysis_agent.nodes import (
     _artifacts_available_to_current_goal,
+    _dependency_goal_results,
     planner_validator_node,
     select_current_goal_node,
 )
@@ -119,9 +120,96 @@ def test_verified_artifact_is_registered_and_available_only_to_dependency(
     assert approved[0]["row_count"] == 1
     assert Path(approved[0]["path"]).is_file()
     assert (tmp_path / "run/approved_goal_artifacts.json").is_file()
-    g2_generation_call = model.calls[4]
+    g2_generation_call = [call for call in model.calls if call.role == "executor"][-1]
     assert str(artifact_path) in g2_generation_call.messages[1]["content"]
     assert result["completed_goal_results"][-1]["result"] == {"normalized_rows": 1}
+
+
+def test_direct_dependency_results_are_available_in_runner_owned_context(
+    tmp_path: Path,
+) -> None:
+    context_path = tmp_path / "run/goals/G2/dependency_goal_results.json"
+    g1 = "__agent_result__ = {'normalized_rows': 1}\n"
+    g2 = "\n".join(
+        [
+            "import json",
+            f"with open({str(context_path)!r}, encoding='utf-8') as handle:",
+            "    context = json.load(handle)",
+            "__agent_result__ = {'normalized_rows': int("
+            "context['goal_results'][0]['result']['normalized_rows'])}",
+        ]
+    )
+    model = ScriptedRoleModel(
+        {
+            "planner": [_plan()],
+            "executor": [_strategy(), _generation(g1), _strategy(), _generation(g2)],
+            "verifier": [
+                '{"decision":"PASS","feedback":"G1 is complete."}',
+                '{"decision":"PASS","feedback":"G2 used the dependency context."}',
+            ],
+        }
+    )
+
+    result = build_graph(model).invoke(_state(tmp_path))
+
+    assert result["status"] == "completed"
+    assert context_path.is_file()
+    assert json.loads(context_path.read_text(encoding="utf-8")) == {
+        "goal_results": [
+            {
+                "goal_id": "G1",
+                "required_outputs": ["normalized table"],
+                "result": {"normalized_rows": 1},
+            }
+        ]
+    }
+    g2_generation_call = [call for call in model.calls if call.role == "executor"][-1]
+    assert str(context_path) in g2_generation_call.messages[1]["content"]
+    assert 'payload["goal_results"]' in g2_generation_call.messages[1]["content"]
+
+
+def test_dependency_context_includes_the_transitive_dependency_closure() -> None:
+    state = {
+        "current_goal": {"goal_id": "G3", "depends_on": ["G2"]},
+        "high_level_plan": {
+            "scientific_objective": "Return values.",
+            "goals": [
+                {
+                    "goal_id": "G1",
+                    "objective": "First.",
+                    "required_outputs": [],
+                    "constraints": [],
+                    "success_criteria": [],
+                    "depends_on": [],
+                },
+                {
+                    "goal_id": "G2",
+                    "objective": "Second.",
+                    "required_outputs": [],
+                    "constraints": [],
+                    "success_criteria": [],
+                    "depends_on": ["G1"],
+                },
+                {
+                    "goal_id": "G3",
+                    "objective": "Third.",
+                    "required_outputs": [],
+                    "constraints": [],
+                    "success_criteria": [],
+                    "depends_on": ["G2"],
+                },
+            ],
+        },
+        "completed_goal_results": [
+            {"goal_id": "G1", "result": {"starts": 1}},
+            {"goal_id": "G2", "result": {"patients": 1}},
+        ],
+    }
+
+    assert _dependency_goal_results(state) == [
+        {"goal_id": "G1", "required_outputs": [], "result": {"starts": 1}},
+        {"goal_id": "G2", "required_outputs": [], "result": {"patients": 1}},
+    ]
 
 
 def test_unverified_artifact_is_never_approved(tmp_path: Path) -> None:

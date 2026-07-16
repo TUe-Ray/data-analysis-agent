@@ -6,6 +6,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO, TypeAlias, TypedDict
@@ -33,6 +35,7 @@ class ProgressEvent(TypedDict, total=False):
     preserved_completed_count: int
     remaining_goal_count: int
     invalidated_goal_ids: list[str]
+    elapsed_seconds: float
     new_goal_ids: list[str]
     goal_id: str
     objective: str
@@ -62,12 +65,20 @@ class BenchmarkProgressRenderer:
         stream: TextIO | None = None,
         interactive: bool | None = None,
         artifact_path: Path | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.stream = stream or sys.stdout
         is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
         self.interactive = (
             is_tty and not os.getenv("CI") if interactive is None else interactive
         )
+        self._stream_is_tty = is_tty
+        self._clock = clock or time.monotonic
+        self._started_at: float | None = None
+        self._finished_at: float | None = None
+        self._timer_stop = threading.Event()
+        self._timer_thread: threading.Thread | None = None
+        self._lock = threading.RLock()
         self.artifact_path = artifact_path
         self.header: list[str] = []
         self.goals: list[dict[str, str]] = []
@@ -84,27 +95,79 @@ class BenchmarkProgressRenderer:
 
     def emit(self, event: ProgressEvent) -> None:
         """Record and render one event without interpreting workflow semantics."""
-        safe_event = {
-            key: sanitize_terminal_text(value)
-            if key in {"error", "message", "objective", "goal_id", "current_goal_id"}
-            and value is not None
-            else value
-            for key, value in event.items()
-        }
-        self.events.append(safe_event)
-        if self.artifact_path is not None:
-            self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.artifact_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(safe_event, ensure_ascii=False) + "\n")
-        self._apply(safe_event)
-        if self.interactive:
-            self._redraw()
-        else:
-            self._append(safe_event)
+        with self._lock:
+            safe_event = {
+                key: sanitize_terminal_text(value)
+                if key
+                in {"error", "message", "objective", "goal_id", "current_goal_id"}
+                and value is not None
+                else value
+                for key, value in event.items()
+            }
+            self.events.append(safe_event)
+            if self.artifact_path is not None:
+                self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.artifact_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(safe_event, ensure_ascii=False) + "\n")
+            self._apply(safe_event)
+            if self.interactive:
+                self._redraw()
+            else:
+                self._append(safe_event)
+
+    def close(self) -> None:
+        """Freeze elapsed time and stop the optional interactive refresh thread."""
+        with self._lock:
+            if self._started_at is None:
+                return
+            if self._finished_at is None:
+                self._finished_at = self._clock()
+            self._timer_stop.set()
+            timer_thread = self._timer_thread
+            self._timer_thread = None
+        if timer_thread is not None and timer_thread is not threading.current_thread():
+            timer_thread.join(timeout=1.0)
+
+    def _start_timer(self) -> None:
+        self._started_at = self._clock()
+        self._finished_at = None
+        self._timer_stop.clear()
+        # Forced interactive StringIO streams are useful in tests, but only a
+        # real TTY should receive background redraws.
+        if self.interactive and self._stream_is_tty:
+            self._timer_thread = threading.Thread(
+                target=self._refresh_timer,
+                name="benchmark-progress-timer",
+                daemon=True,
+            )
+            self._timer_thread.start()
+
+    def _refresh_timer(self) -> None:
+        while not self._timer_stop.wait(1.0):
+            with self._lock:
+                if self._finished_at is not None:
+                    return
+                self._redraw()
+
+    def _elapsed_seconds(self) -> float:
+        if self._started_at is None:
+            return 0.0
+        end = self._finished_at if self._finished_at is not None else self._clock()
+        return max(0.0, end - self._started_at)
+
+    def _elapsed_text(self) -> str:
+        total_seconds = int(self._elapsed_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _elapsed_line(self) -> str:
+        return f"Elapsed: {self._elapsed_text()}"
 
     def _apply(self, event: ProgressEvent) -> None:
         kind = event["type"]
         if kind == "benchmark_started":
+            self._start_timer()
             self.header = [
                 "=" * 60,
                 f"BENCHMARK RUN {event['repeat_index']}/{event['repeats']}",
@@ -113,6 +176,10 @@ class BenchmarkProgressRenderer:
                 f"Model      : {event['model']}",
                 "=" * 60,
             ]
+        elif kind == "benchmark_finished":
+            if self._started_at is not None:
+                self._finished_at = self._clock()
+                self._timer_stop.set()
         elif kind == "plan_available":
             self.goals = [
                 {
@@ -197,7 +264,7 @@ class BenchmarkProgressRenderer:
         return f"Current step: G{goal_index} — {goal['objective']}"
 
     def _redraw(self) -> None:
-        lines = [*self.header]
+        lines = [*self.header, self._elapsed_line()]
         lines.extend(self._progress_lines())
         title = self._current_title()
         if title:
@@ -208,7 +275,7 @@ class BenchmarkProgressRenderer:
     def _append(self, event: ProgressEvent) -> None:
         kind = event["type"]
         if kind == "benchmark_started":
-            lines = [*self.header, ""]
+            lines = [*self.header, self._elapsed_line(), ""]
         elif kind == "workflow_started":
             lines = ["Agent workflow started"]
         elif kind == "plan_available":
@@ -239,6 +306,8 @@ class BenchmarkProgressRenderer:
             lines = [str(message)] if message else []
         else:
             lines = []
+        if kind not in {"benchmark_started"} and lines:
+            lines.insert(0, self._elapsed_line())
         if lines:
             self.stream.write("\n".join(lines) + "\n")
             self.stream.flush()

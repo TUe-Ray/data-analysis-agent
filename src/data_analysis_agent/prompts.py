@@ -22,7 +22,9 @@ tabular intermediate belongs in a declared artifact after its producing goal is
 verified. A scientific replan must return the full workflow, including every
 completed goal unchanged. Never reuse a completed goal_id for a new definition.
 When a revised goal needs a prior approved artifact, explicitly list its producer
-goal_id in depends_on; artifacts are not otherwise available."""
+goal_id in depends_on; artifacts are not otherwise available. If a goal text
+mentions a prior goal_id, include that exact goal_id in depends_on. A goal receives
+JSON results from all declared dependencies and their upstream dependencies."""
 
 PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid scientific
 HighLevelPlan response. Return exactly one JSON object matching the required
@@ -32,7 +34,12 @@ must name an existing goal_id that appears earlier in the goals list. Do not
 calculate results or add implementation details, code, tools, or file paths. Do
 not remove required task outputs merely to make the structure valid. Express
 required outputs as JSON-compatible facts or declared analysis artifacts, never as
-in-memory DataFrames, Series, arrays, or other Python objects."""
+in-memory DataFrames, Series, arrays, or other Python objects. When immutable
+completed goal definitions are supplied, this is a scientific-replan repair:
+return the complete workflow, copy every supplied completed goal definition
+unchanged, and retain the remaining goals. Do not return only the remaining goals
+or use a completed goal_id for a changed definition. Repair the supplied invalid
+response's structure; do not perform another scientific replan."""
 
 EXECUTOR_SYSTEM_PROMPT = """You are the tactical Executor for one scientific goal.
 Choose a trusted built-in capability when it directly satisfies the goal; otherwise
@@ -199,6 +206,7 @@ def build_planner_repair_messages(
     validation_error: str,
     previous_plan: dict[str, JsonValue] | None = None,
     completed_goal_fingerprints: dict[str, str] | None = None,
+    completed_goal_definitions: list[dict[str, JsonValue]] | None = None,
     approved_artifacts: list[dict[str, JsonValue]] | None = None,
 ) -> list[dict[str, str]]:
     """Build a compact structural-only repair request for Planner output."""
@@ -217,10 +225,18 @@ def build_planner_repair_messages(
                 f"Invalid Planner response:\n{invalid_response}\n\n"
                 f"Deterministic validation error:\n{validation_error}\n\n"
                 + (
-                    "Previous full plan (return it with valid revisions, retaining "
-                    "completed goals exactly):\n"
+                    "Previous full plan (reference for restoring immutable completed "
+                    "goals; do not replace the candidate with a residual plan):\n"
                     f"{json.dumps(previous_plan)}\n\n"
                     if previous_plan is not None
+                    else ""
+                )
+                + (
+                    "Immutable completed goal definitions (copy every object below "
+                    "unchanged into the complete repaired plan, before dependent "
+                    "remaining goals):\n"
+                    f"{json.dumps(completed_goal_definitions)}\n\n"
+                    if completed_goal_definitions
                     else ""
                 )
                 + (
@@ -238,7 +254,8 @@ def build_planner_repair_messages(
                 + f"HighLevelPlan JSON schema summary:\n{schema_summary}\n\n"
                 + "Dependency rule: every depends_on item must exactly match an "
                 "existing earlier goal_id; forward and missing dependencies are "
-                "invalid."
+                "invalid. Return the complete repaired workflow, never only its "
+                "uncompleted suffix."
             ),
         },
     ]
@@ -290,6 +307,7 @@ def build_python_generation_messages(
     staged_file_paths: list[str],
     completed_goal_results: list[dict[str, JsonValue]],
     goal_directory: str,
+    input_context: str = "",
     approved_artifacts: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
     """Supply generated-code creation only the current factual execution context."""
@@ -302,6 +320,17 @@ def build_python_generation_messages(
                 f"Allowed input files:\n{json.dumps(staged_file_paths)}\n\n"
                 "Use those exact absolute paths directly as string literals when "
                 "reading data.\n\n"
+                f"Staged input schema and factual context:\n{input_context}\n\n"
+                "If dependency_goal_results.json is listed, it is the only "
+                "runner-created file containing prerequisite results. Read "
+                "that exact path with json.load when prior result values are "
+                'needed. Its exact shape is {"goal_results":[{"goal_id":"...",'
+                '"required_outputs":["..."],"result":{...}}]}; read '
+                'payload["goal_results"] and find the '
+                "entry with the required goal_id. No prerequisite Python variables "
+                "are preloaded, and you "
+                "must never invent or read files such as "
+                "goals/<goal_id>/results.json.\n\n"
                 "Completed prerequisite results:\n"
                 f"{json.dumps(completed_goal_results)}\n\n"
                 "Verifier-approved prerequisite artifacts:\n"
@@ -326,6 +355,8 @@ def build_python_repair_messages(
     failure_fingerprint: str | None = None,
     staged_file_paths: list[str],
     goal_directory: str,
+    input_context: str = "",
+    completed_goal_results: list[dict[str, JsonValue]] | None = None,
     repair_history: list[dict[str, object]] | None = None,
     approved_artifacts: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
@@ -345,6 +376,19 @@ def build_python_repair_messages(
                 f"Execution error:\n{error or 'none'}\n\n"
                 "Allowed libraries: Python standard library, pandas, numpy, scipy.\n"
                 f"Allowed files:\n{json.dumps(staged_file_paths)}\n\n"
+                f"Staged input schema and factual context:\n{input_context}\n\n"
+                "If dependency_goal_results.json is listed, read that exact file "
+                "for prerequisite result values. Its exact shape is "
+                '{"goal_results":[{"goal_id":"...","required_outputs":["..."],'
+                '"result":{...}}]}; use payload["goal_results"] and find the '
+                "matching goal_id. Check required_outputs before assuming a result "
+                "contains a value. "
+                "No prerequisite "
+                "Python "
+                "variables are preloaded. Never invent or read files such as "
+                "goals/<goal_id>/results.json.\n\n"
+                "Completed prerequisite results:\n"
+                f"{json.dumps(completed_goal_results or [])}\n\n"
                 "Verifier-approved prerequisite artifacts:\n"
                 f"{json.dumps(approved_artifacts or [])}\n\n"
                 f"Allowed output directory and process cwd:\n{goal_directory}\n\n"

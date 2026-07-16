@@ -150,6 +150,28 @@ def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
             raise PlannerOutputError(
                 f"Goal {goal.goal_id!r} depends on a missing or later goal"
             )
+        goal_text = "\n".join(
+            [
+                goal.objective,
+                *goal.required_outputs,
+                *goal.constraints,
+                *goal.success_criteria,
+            ]
+        )
+        referenced = [
+            goal_id
+            for goal_id in seen
+            if re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(goal_id)}(?![A-Za-z0-9_])",
+                goal_text,
+            )
+        ]
+        omitted = [goal_id for goal_id in referenced if goal_id not in goal.depends_on]
+        if omitted:
+            raise PlannerOutputError(
+                f"Goal {goal.goal_id!r} references prior goal(s) without depending "
+                f"on them: {', '.join(omitted)}"
+            )
         seen.add(goal.goal_id)
     return plan, True
 
@@ -175,6 +197,19 @@ def _completed_goal_fingerprints(state: AgentState) -> dict[str, str]:
         for goal in previous.goals
         if goal.goal_id in completed_ids
     }
+
+
+def _completed_goal_definitions(state: AgentState) -> list[dict[str, object]]:
+    """Return the exact completed goals that a scientific replan must retain."""
+    previous = HighLevelPlan.model_validate(state["high_level_plan"])
+    completed_ids = {
+        str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
+    }
+    return [
+        goal.model_dump(mode="json")
+        for goal in previous.goals
+        if goal.goal_id in completed_ids
+    ]
 
 
 def _validate_replan_continuity(state: AgentState, revised_plan: HighLevelPlan) -> None:
@@ -473,6 +508,11 @@ def make_planner_repair_node(model: RoleModel) -> Node:
                     if state.get("planner_mode") == "scientific_replan"
                     else None
                 ),
+                completed_goal_definitions=(
+                    _completed_goal_definitions(state)
+                    if state.get("planner_mode") == "scientific_replan"
+                    else None
+                ),
                 approved_artifacts=(
                     [
                         artifact.model_dump(mode="json")
@@ -566,9 +606,55 @@ def _artifacts_available_to_current_goal(state: AgentState) -> list[GoalArtifact
     ]
 
 
+def _dependency_goal_results(state: AgentState) -> list[dict[str, object]]:
+    """Return declared prerequisites and their upstream closure for code context."""
+    current = state.get("current_goal")
+    if not isinstance(current, dict):
+        return []
+    plan = HighLevelPlan.model_validate(state["high_level_plan"])
+    goals_by_id = {goal.goal_id: goal for goal in plan.goals}
+    required: set[str] = set()
+    pending = [str(goal_id) for goal_id in current.get("depends_on", [])]
+    while pending:
+        goal_id = pending.pop()
+        if goal_id in required:
+            continue
+        required.add(goal_id)
+        dependency_goal = goals_by_id.get(goal_id)
+        if dependency_goal is not None:
+            pending.extend(dependency_goal.depends_on)
+    return [
+        {
+            "goal_id": str(item.get("goal_id")),
+            "required_outputs": goals_by_id[str(item.get("goal_id"))].required_outputs,
+            "result": item.get("result", {}),
+        }
+        for item in state.get("completed_goal_results", [])
+        if str(item.get("goal_id")) in required
+    ]
+
+
+def _dependency_result_context_path(state: AgentState) -> Path | None:
+    """Materialize prerequisite results as an explicitly allowed input."""
+    results = _dependency_goal_results(state)
+    if not results:
+        return None
+    goal = IntermediateGoal.model_validate(state["current_goal"])
+    goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
+    goal_directory.mkdir(parents=True, exist_ok=True)
+    path = goal_directory / "dependency_goal_results.json"
+    path.write_text(
+        json.dumps({"goal_results": results}, ensure_ascii=False), encoding="utf-8"
+    )
+    return path.resolve()
+
+
 def _allowed_paths(state: AgentState) -> list[Path]:
     """Combine public staged inputs with dependency-safe approved artifacts."""
     paths = [*_staged_paths(state)]
+    dependency_context = _dependency_result_context_path(state)
+    if dependency_context is not None:
+        paths.append(dependency_context)
     paths.extend(
         Path(item.path).resolve()
         for item in _artifacts_available_to_current_goal(state)
@@ -1158,8 +1244,9 @@ def make_executor_node(
             source_messages = build_python_generation_messages(
                 current_goal=goal.model_dump(mode="json"),
                 staged_file_paths=[str(path) for path in _allowed_paths(state)],
-                completed_goal_results=list(state.get("completed_goal_results", [])),
+                completed_goal_results=_dependency_goal_results(state),
                 goal_directory=str(goal_directory),
+                input_context=state["input_context"],
                 approved_artifacts=_approved_artifact_context(state),
             )
             contract, version, response_history, artifacts, contract_error = (
@@ -1258,6 +1345,8 @@ def make_mechanical_repair_node(
             failure_fingerprint=state.get("consecutive_failure_fingerprint"),
             staged_file_paths=[str(path) for path in _allowed_paths(state)],
             goal_directory=str(Path(state["run_directory"]) / "goals" / goal.goal_id),
+            input_context=state["input_context"],
+            completed_goal_results=_dependency_goal_results(state),
             repair_history=history,
             approved_artifacts=_approved_artifact_context(state),
         )

@@ -512,6 +512,9 @@ def run_benchmark(
                 results.append(result)
                 with results_path.open("a", encoding="utf-8") as handle:
                     handle.write(result.model_dump_json() + "\n")
+                if renderer:
+                    renderer.emit({"type": "benchmark_finished"})
+                    renderer.close()
 
     summary = BenchmarkSummary(
         benchmark_run_id=run_id,

@@ -10,6 +10,7 @@ from data_analysis_agent import nebius_client
 from data_analysis_agent.config import Settings
 from data_analysis_agent.models import (
     EmptyModelResponseError,
+    MalformedModelResponseError,
     ModelCapabilityError,
     ModelOutputLimitError,
     NebiusRoleModel,
@@ -23,6 +24,7 @@ def _response(
     *,
     finish_reason: str | None = "stop",
     usage: tuple[int, int, int] | None = None,
+    tool_calls: list[object] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id="response-id",
@@ -42,7 +44,7 @@ def _response(
                 message=SimpleNamespace(
                     content=content,
                     refusal=None,
-                    tool_calls=None,
+                    tool_calls=tool_calls,
                 ),
             )
         ],
@@ -215,6 +217,48 @@ def test_nebius_raises_typed_error_after_empty_response_retries() -> None:
     with (
         patch("data_analysis_agent.models.time.sleep"),
         pytest.raises(EmptyModelResponseError, match="after 3 attempts"),
+    ):
+        model.generate(role="executor", messages=[])
+
+    assert client.chat.completions.create.call_count == 3
+    assert model.last_response_retry_count == 2
+
+
+def test_nebius_retries_tool_call_only_response_with_correction() -> None:
+    client = Mock()
+    client.chat.completions.create.side_effect = [
+        _response(None, finish_reason="tool_calls", tool_calls=[object()]),
+        _response('{"strategy":"generated_python"}'),
+    ]
+    model = NebiusRoleModel(client=client, model="test-model")
+
+    with patch("data_analysis_agent.models.time.sleep") as sleep:
+        output = model.generate(
+            role="executor", messages=[{"role": "user", "content": "x"}]
+        )
+
+    assert output == '{"strategy":"generated_python"}'
+    assert model.last_response_retry_count == 1
+    assert client.chat.completions.create.call_count == 2
+    retry_messages = client.chat.completions.create.call_args_list[1].kwargs[
+        "messages"
+    ]
+    assert retry_messages[-1]["role"] == "user"
+    assert "No tools are available" in retry_messages[-1]["content"]
+    assert model.last_provider_attempts[0]["tool_calls"] is True
+    sleep.assert_called_once_with(0.5)
+
+
+def test_nebius_stops_after_repeated_tool_call_only_responses() -> None:
+    client = Mock()
+    client.chat.completions.create.return_value = _response(
+        None, finish_reason="tool_calls", tool_calls=[object()]
+    )
+    model = NebiusRoleModel(client=client, model="test-model")
+
+    with (
+        patch("data_analysis_agent.models.time.sleep"),
+        pytest.raises(MalformedModelResponseError, match="after 3 attempts"),
     ):
         model.generate(role="executor", messages=[])
 
