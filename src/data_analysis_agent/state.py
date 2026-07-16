@@ -73,8 +73,11 @@ class AgentState(TypedDict, total=False):
     input_data: list[str]
     file_paths: list[str]
     input_context: str
+    input_profile: dict[str, JsonValue]
+    answer_schema: dict[str, JsonValue]
     plan: str
     high_level_plan: dict[str, JsonValue]
+    final_output_goal_id: str | None
     plan_revision: int
     is_scientific_replan: bool
     total_goal_count: int
@@ -106,9 +109,11 @@ class AgentState(TypedDict, total=False):
     max_code_repair_attempts: int
     code_repair_no_progress_count: int
     max_code_repair_no_progress_attempts: int
+    max_failure_family_attempts: int
     code_repair_no_progress: bool
     consecutive_failure_family: str | None
     consecutive_failure_fingerprint: str | None
+    consecutive_failure_family_count: int
     current_generated_code: str
     generated_execution_history: list[dict[str, JsonValue]]
     python_response_history: list[dict[str, JsonValue]]
@@ -136,6 +141,17 @@ class AgentState(TypedDict, total=False):
     planner_mode: Literal["initial", "scientific_replan"]
     planner_repair_count: int
     max_planner_repairs: int
+    max_plan_goals: int
+    max_model_calls: int
+    max_goal_result_bytes: int
+    max_goal_result_list_length: int
+    max_goal_result_depth: int
+    executor_strategy_repair_count: int
+    contract_escalated_goal_ids: list[str]
+    contract_escalation_required: bool
+    rollback_count: int
+    max_goal_rollbacks: int
+    max_rollback_goals: int
     planner_validation_error: str | None
     planner_raw_response: str
     planner_response_history: list[dict[str, JsonValue]]

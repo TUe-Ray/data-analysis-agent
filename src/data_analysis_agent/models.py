@@ -65,6 +65,10 @@ class MalformedModelResponseError(ProviderResponseError):
     """Raised when a provider never returns usable final response content."""
 
 
+class ModelCallLimitError(RuntimeError):
+    """Raised before a full-agent run exceeds its logical model-call ceiling."""
+
+
 DEFAULT_ORDINARY_OUTPUT_TOKENS = 8192
 DEFAULT_PYTHON_OUTPUT_TOKENS = 32768
 DEFAULT_LEGACY_OUTPUT_TOKENS = 4096
@@ -603,9 +607,11 @@ class RecordingRoleModel:
         model: RoleModel,
         call_observer: Callable[[str, Role, int, float, str | None], None]
         | None = None,
+        max_calls: int | None = None,
     ) -> None:
         self._model = model
         self._call_observer = call_observer
+        self._max_calls = max_calls
         self.exchanges: list[ModelExchange] = []
 
     def generate(self, *, role: Role, messages: list[dict[str, str]]) -> str:
@@ -646,6 +652,10 @@ class RecordingRoleModel:
         schema_name: str | None,
         generate: Callable[[], str],
     ) -> str:
+        if self._max_calls is not None and len(self.exchanges) >= self._max_calls:
+            raise ModelCallLimitError(
+                f"full-agent model-call ceiling reached ({self._max_calls})"
+            )
         started = time.perf_counter()
         call_number = len(self.exchanges) + 1
         if self._call_observer:

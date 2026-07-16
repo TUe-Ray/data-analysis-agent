@@ -8,9 +8,17 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 DEFAULT_NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
-DEFAULT_MAX_CODE_REPAIR_ATTEMPTS = 50
+DEFAULT_MAX_CODE_REPAIR_ATTEMPTS = 8
 DEFAULT_CODE_REPAIR_NO_PROGRESS_ATTEMPTS = 3
-DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS = 2
+DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS = 3
+DEFAULT_MAX_PLAN_GOALS = 6
+DEFAULT_MAX_GOAL_RESULT_BYTES = 262_144
+DEFAULT_MAX_GOAL_RESULT_LIST_LENGTH = 100
+DEFAULT_MAX_GOAL_RESULT_DEPTH = 10
+DEFAULT_MAX_FAILURE_FAMILY_ATTEMPTS = 5
+DEFAULT_MAX_MODEL_CALLS = 80
+DEFAULT_MAX_GOAL_ROLLBACKS = 1
+DEFAULT_MAX_ROLLBACK_GOALS = 6
 
 
 class ConfigurationError(ValueError):
@@ -61,6 +69,36 @@ def max_planner_repair_attempts() -> int:
     return _positive_environment_int(
         "MAX_PLANNER_REPAIR_ATTEMPTS", DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS
     )
+
+
+def full_agent_reliability_settings() -> dict[str, int]:
+    """Return bounded, environment-configurable full-agent safety settings."""
+    return {
+        "max_plan_goals": _positive_environment_int(
+            "MAX_PLAN_GOALS", DEFAULT_MAX_PLAN_GOALS
+        ),
+        "max_goal_result_bytes": _positive_environment_int(
+            "MAX_GOAL_RESULT_BYTES", DEFAULT_MAX_GOAL_RESULT_BYTES
+        ),
+        "max_goal_result_list_length": _positive_environment_int(
+            "MAX_GOAL_RESULT_LIST_LENGTH", DEFAULT_MAX_GOAL_RESULT_LIST_LENGTH
+        ),
+        "max_goal_result_depth": _positive_environment_int(
+            "MAX_GOAL_RESULT_DEPTH", DEFAULT_MAX_GOAL_RESULT_DEPTH
+        ),
+        "max_failure_family_attempts": _positive_environment_int(
+            "MAX_FAILURE_FAMILY_ATTEMPTS", DEFAULT_MAX_FAILURE_FAMILY_ATTEMPTS
+        ),
+        "max_model_calls": _positive_environment_int(
+            "MAX_MODEL_CALLS", DEFAULT_MAX_MODEL_CALLS
+        ),
+        "max_goal_rollbacks": _positive_environment_int(
+            "MAX_GOAL_ROLLBACKS", DEFAULT_MAX_GOAL_ROLLBACKS
+        ),
+        "max_rollback_goals": _positive_environment_int(
+            "MAX_ROLLBACK_GOALS", DEFAULT_MAX_ROLLBACK_GOALS
+        ),
+    }
 
 
 def load_settings(*, load_dotenv_file: bool = True) -> Settings:

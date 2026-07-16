@@ -121,7 +121,12 @@ with io.StringIO({data_content!r}) as handle:
     values = [float(row["value"]) for row in csv.DictReader(handle) if row["value"]]
 differences = [abs(right - left) for left, right in zip(values, values[1:])]
 value = sum(differences) / len(differences)
-__agent_result__ = {{"mean_absolute_successive_difference": value}}
+__agent_result__ = {{
+    "status": "completed",
+    "answer": "The requested statistic was computed from non-missing values.",
+    "key_results": {{"mean_absolute_successive_difference": value}},
+    "limitations": [],
+}}
 """
     structured_code = json.dumps(
         {
@@ -182,7 +187,12 @@ print(json.dumps({{
                         "Compute the mean absolute successive difference of the "
                         "non-missing value sequence."
                     ),
-                    "required_outputs": ["mean_absolute_successive_difference"],
+                    "required_outputs": [
+                        "status",
+                        "answer",
+                        "key_results.mean_absolute_successive_difference",
+                        "limitations",
+                    ],
                     "constraints": [
                         "Preserve input order.",
                         "Do not impute missing values.",
@@ -191,6 +201,7 @@ print(json.dumps({{
                     "depends_on": [],
                 }
             ],
+            "final_output_goal_id": "compute_successive_difference",
         }
     )
     strategy = json.dumps(

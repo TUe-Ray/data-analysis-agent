@@ -123,6 +123,8 @@ class HighLevelPlan(BaseModel):
 
     scientific_objective: str = Field(min_length=1)
     goals: list[IntermediateGoal] = Field(min_length=1)
+    final_output_goal_id: str | None = None
+    invalidate_from_goal_id: str | None = None
 
 
 class ExecutionStrategy(BaseModel):

@@ -276,12 +276,18 @@ def test_exhausted_replan_budget_never_renders_two_of_one(tmp_path: Path) -> Non
                 {
                     "goal_id": "G1",
                     "objective": "Return a value.",
-                    "required_outputs": ["value"],
+                    "required_outputs": [
+                        "status",
+                        "answer",
+                        "key_results.mean_absolute_successive_difference",
+                        "limitations",
+                    ],
                     "constraints": [],
                     "success_criteria": ["A value is returned."],
                     "depends_on": [],
                 }
             ],
+            "final_output_goal_id": "G1",
         }
     )
     strategy = json.dumps(
@@ -295,7 +301,11 @@ def test_exhausted_replan_budget_never_renders_two_of_one(tmp_path: Path) -> Non
     generation = json.dumps(
         {
             "kind": "python",
-            "code": "__agent_result__ = {'value': 1}\n",
+            "code": (
+                "__agent_result__ = {'status': 'completed', 'answer': 'done', "
+                "'key_results': {'mean_absolute_successive_difference': 1.0}, "
+                "'limitations': []}\n"
+            ),
             "summary": "Return the value.",
         }
     )

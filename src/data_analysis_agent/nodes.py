@@ -20,15 +20,20 @@ from data_analysis_agent.final_output import (
     FinalOutputProvider,
     OutputRepairRequest,
 )
-from data_analysis_agent.models import RoleModel
+from data_analysis_agent.models import ProviderResponseError, RoleModel
 from data_analysis_agent.prompts import (
     VERIFIER_REPAIR_PROMPT,
     build_executor_messages,
+    build_executor_strategy_repair_messages,
     build_planner_messages,
     build_planner_repair_messages,
     build_python_generation_messages,
     build_python_repair_messages,
     build_verifier_messages,
+)
+from data_analysis_agent.public_schema import (
+    required_schema_paths,
+    validate_against_public_schema,
 )
 from data_analysis_agent.python_runner import (
     LocalPythonRunner,
@@ -113,7 +118,155 @@ def _failure_fingerprint(final: PythonExecutionResult) -> str | None:
     return f"{category}|{meaningful}"
 
 
-def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
+def _goal_result_limit_error(state: AgentState, value: object) -> str | None:
+    """Reject oversized nested state payloads; tables must be declared artifacts."""
+    max_bytes = state.get("max_goal_result_bytes", 262_144)
+    max_list = state.get("max_goal_result_list_length", 100)
+    max_depth = state.get("max_goal_result_depth", 10)
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        return f"result is not JSON-serializable: {error}"
+    if len(serialized.encode("utf-8")) > max_bytes:
+        return (
+            f"result exceeds {max_bytes} serialized bytes; store large tables as "
+            "declared artifacts"
+        )
+
+    def inspect(item: object, depth: int) -> str | None:
+        if depth > max_depth:
+            return f"result nesting exceeds maximum depth {max_depth}"
+        if isinstance(item, list):
+            if len(item) > max_list:
+                return (
+                    f"result list length {len(item)} exceeds {max_list}; store large "
+                    "tables as declared artifacts"
+                )
+            for nested in item:
+                error = inspect(nested, depth + 1)
+                if error:
+                    return error
+        elif isinstance(item, dict):
+            for nested in item.values():
+                error = inspect(nested, depth + 1)
+                if error:
+                    return error
+        return None
+
+    return inspect(value, 1)
+
+
+def _available_contract_fields(state: AgentState) -> set[str]:
+    """Collect declared field names without reading unstaged or artifact contents."""
+    fields: set[str] = set()
+    profile = state.get("input_profile", {})
+    files = profile.get("files", []) if isinstance(profile, dict) else []
+    if isinstance(files, list):
+        for file_profile in files:
+            if not isinstance(file_profile, dict):
+                continue
+            columns = file_profile.get("columns", [])
+            if isinstance(columns, list):
+                for column in columns:
+                    if isinstance(column, dict) and isinstance(column.get("name"), str):
+                        fields.add(column["name"])
+    for artifact in _artifacts_available_to_current_goal(state):
+        fields.update(artifact.columns or [])
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                fields.add(str(key))
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value[:10]:
+                collect(nested)
+
+    for dependency in _dependency_goal_results(state):
+        collect(dependency.get("result", {}))
+    return fields
+
+
+def _missing_contract_field(error: str | None) -> str | None:
+    """Extract only explicit missing-field failures, never infer from vague errors."""
+    if not error:
+        return None
+    patterns = (
+        r"KeyError:\s*['\"]([^'\"]+)['\"]",
+        r"missing (?:required )?(?:field|key)\s*['\"]?([A-Za-z_][\w.-]*)",
+        r"column\s*['\"]([^'\"]+)['\"]\s*(?:not found|does not exist)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, error, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _requires_contract_escalation(
+    state: AgentState, *, success: bool, error: str | None
+) -> bool:
+    if success:
+        return False
+    goal_id = str(state.get("current_goal", {}).get("goal_id", ""))
+    if goal_id in state.get("contract_escalated_goal_ids", []):
+        return False
+    missing = _missing_contract_field(error)
+    if missing is None or missing in _available_contract_fields(state):
+        return False
+    current = state.get("current_goal", {})
+    contract_text = "\n".join(
+        [
+            str(current.get("objective", "")),
+            *[str(item) for item in current.get("required_outputs", [])],
+            *[str(item) for item in current.get("constraints", [])],
+            *[str(item) for item in current.get("success_criteria", [])],
+        ]
+    )
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(missing)}(?![A-Za-z0-9_])",
+            contract_text,
+        )
+        is not None
+    )
+
+
+def contract_escalation_node(state: AgentState) -> dict[str, object]:
+    """Convert one unavailable dependency contract into a bounded scientific replan."""
+    goal_id = str(state["current_goal"]["goal_id"])
+    missing = _missing_contract_field(
+        str(state.get("current_goal_result", {}).get("error") or "")
+    )
+    if missing is None and state.get("generated_execution_history"):
+        latest = state["generated_execution_history"][-1]
+        missing = _missing_contract_field(
+            "\n".join([str(latest.get("error") or ""), str(latest.get("stderr") or "")])
+        )
+    escalated = list(
+        dict.fromkeys([*state.get("contract_escalated_goal_ids", []), goal_id])
+    )
+    feedback = (
+        f"Planner contract escalation for {goal_id}: required upstream field "
+        f"{missing!r} is absent from available input, dependency, and artifact "
+        "contracts. Revise the plan or producer contract."
+    )
+    return {
+        "verification_decision": "REPLAN",
+        "verification_feedback": feedback,
+        "contract_escalated_goal_ids": escalated,
+        "contract_escalation_required": False,
+        "failure_category": "scientific_verification_failure",
+        "trace": _trace(state, "contract_escalation:planner"),
+    }
+
+
+def _validate_plan(
+    raw_output: str,
+    *,
+    answer_schema: dict[str, object] | None = None,
+    max_plan_goals: int = 100,
+) -> tuple[HighLevelPlan, bool]:
     try:
         plan = HighLevelPlan.model_validate_json(raw_output)
     except ValidationError as error:
@@ -139,6 +292,10 @@ def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
             False,
         )
     goal_ids = [goal.goal_id for goal in plan.goals]
+    if len(plan.goals) > max_plan_goals:
+        raise PlannerOutputError(
+            f"Planner returned {len(plan.goals)} goals; maximum is {max_plan_goals}"
+        )
     if len(goal_ids) != len(set(goal_ids)):
         raise PlannerOutputError("Planner goal_id values must be unique")
     seen: set[str] = set()
@@ -173,6 +330,48 @@ def _validate_plan(raw_output: str) -> tuple[HighLevelPlan, bool]:
                 f"on them: {', '.join(omitted)}"
             )
         seen.add(goal.goal_id)
+    if answer_schema:
+        final_goal_id = plan.final_output_goal_id
+        if final_goal_id is None:
+            raise PlannerOutputError(
+                "Plan must declare final_output_goal_id for the public answer"
+            )
+        if final_goal_id != plan.goals[-1].goal_id:
+            raise PlannerOutputError("final_output_goal_id must identify the last goal")
+        final_goal = plan.goals[-1]
+        goals_by_id = {goal.goal_id: goal for goal in plan.goals}
+        dependency_closure: set[str] = set()
+        pending = list(final_goal.depends_on)
+        while pending:
+            dependency = pending.pop()
+            if dependency in dependency_closure:
+                continue
+            dependency_closure.add(dependency)
+            pending.extend(goals_by_id[dependency].depends_on)
+        required_dependencies = set(goal_ids[:-1])
+        if not required_dependencies.issubset(dependency_closure):
+            missing = sorted(required_dependencies - dependency_closure)
+            raise PlannerOutputError(
+                "Final assembly dependency closure must include every earlier goal; "
+                "missing: " + ", ".join(missing)
+            )
+        required_paths = set(required_schema_paths(answer_schema))
+        declared_paths = {
+            item.strip().removeprefix("$.") for item in final_goal.required_outputs
+        }
+        missing_paths = sorted(
+            path
+            for path in required_paths
+            if not any(
+                path == declared or path.startswith(f"{declared}.")
+                for declared in declared_paths
+            )
+        )
+        if missing_paths:
+            raise PlannerOutputError(
+                "Final assembly goal does not cover required public output path(s): "
+                + ", ".join(missing_paths)
+            )
     return plan, True
 
 
@@ -212,12 +411,64 @@ def _completed_goal_definitions(state: AgentState) -> list[dict[str, object]]:
     ]
 
 
+def _planner_completed_goal_summaries(state: AgentState) -> list[dict[str, object]]:
+    """Keep scientific replan context bounded to contracts and small key sets."""
+    return [
+        {
+            "goal_id": item.get("goal_id"),
+            "success": item.get("success"),
+            "result_keys": sorted(item.get("result", {}).keys())
+            if isinstance(item.get("result"), dict)
+            else [],
+            "artifact_paths": item.get("artifact_paths", []),
+        }
+        for item in state.get("completed_goal_results", [])
+    ]
+
+
+def _rollback_goal_ids(state: AgentState, revised_plan: HighLevelPlan) -> set[str]:
+    """Validate and return a completed target plus its completed descendants."""
+    target = revised_plan.invalidate_from_goal_id
+    if target is None:
+        return set()
+    if state.get("rollback_count", 0) >= state.get("max_goal_rollbacks", 1):
+        raise PlannerOutputError("scientific replan rollback budget is exhausted")
+    previous = HighLevelPlan.model_validate(state["high_level_plan"])
+    completed_ids = {
+        str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
+    }
+    if target not in completed_ids:
+        raise PlannerOutputError(
+            f"invalidate_from_goal_id must name a completed goal; got {target!r}"
+        )
+    invalidated = {target}
+    changed = True
+    while changed:
+        changed = False
+        for goal in previous.goals:
+            if (
+                goal.goal_id in completed_ids
+                and goal.goal_id not in invalidated
+                and any(dependency in invalidated for dependency in goal.depends_on)
+            ):
+                invalidated.add(goal.goal_id)
+                changed = True
+    if len(invalidated) > state.get("max_rollback_goals", 6):
+        raise PlannerOutputError(
+            f"rollback scope {len(invalidated)} exceeds configured maximum"
+        )
+    return invalidated
+
+
 def _validate_replan_continuity(state: AgentState, revised_plan: HighLevelPlan) -> None:
     """Reject silent loss or mutation of already verified scientific work."""
     previous = HighLevelPlan.model_validate(state["high_level_plan"])
     previous_by_id = {goal.goal_id: goal for goal in previous.goals}
     revised_by_id = {goal.goal_id: goal for goal in revised_plan.goals}
+    invalidated = _rollback_goal_ids(state, revised_plan)
     for goal_id, fingerprint in _completed_goal_fingerprints(state).items():
+        if goal_id in invalidated:
+            continue
         revised_goal = revised_by_id.get(goal_id)
         if revised_goal is None:
             raise PlannerOutputError(
@@ -243,11 +494,13 @@ def _preserve_completed_results(
     revised_goals = {
         goal.goal_id: _goal_fingerprint(goal) for goal in revised_plan.goals
     }
+    invalidated = _rollback_goal_ids(state, revised_plan)
     return [
         dict(result)
         for result in state.get("completed_goal_results", [])
         if (
-            str(result.get("goal_id")) in revised_goals
+            str(result.get("goal_id")) not in invalidated
+            and str(result.get("goal_id")) in revised_goals
             and previous_goals.get(str(result.get("goal_id")))
             == revised_goals[str(result.get("goal_id"))]
         )
@@ -316,7 +569,7 @@ def make_planner_node(model: RoleModel) -> Node:
             ),
             previous_plan=(state.get("high_level_plan") if is_replan else None),
             completed_goal_results=(
-                state.get("completed_goal_results", []) if is_replan else None
+                _planner_completed_goal_summaries(state) if is_replan else None
             ),
             completed_goal_fingerprints=(
                 _completed_goal_fingerprints(state) if is_replan else None
@@ -332,6 +585,9 @@ def make_planner_node(model: RoleModel) -> Node:
             current_goal_failure=(
                 state.get("current_goal_result") if is_replan else None
             ),
+            answer_schema=state.get("answer_schema"),
+            required_output_paths=required_schema_paths(state.get("answer_schema")),
+            max_plan_goals=state.get("max_plan_goals", 100),
         )
         run_id = state.get("run_id") or uuid.uuid4().hex[:12]
         run_directory = state.get("run_directory") or str(
@@ -377,9 +633,17 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
     )
     mode = state.get("planner_mode", "initial")
     try:
-        plan, structured = _validate_plan(raw_response)
+        plan, structured = _validate_plan(
+            raw_response,
+            answer_schema=state.get("answer_schema"),
+            max_plan_goals=state.get("max_plan_goals", 100),
+        )
         if state.get("planner_mode") == "scientific_replan" and structured:
             _validate_replan_continuity(state, plan)
+        elif plan.invalidate_from_goal_id is not None:
+            raise PlannerOutputError(
+                "invalidate_from_goal_id is allowed only on a scientific replan"
+            )
     except PlannerOutputError as error:
         validation_error = f"{type(error).__name__}: {error}"
         route = (
@@ -423,6 +687,9 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
         encoding="utf-8",
     )
     is_replan = mode == "scientific_replan"
+    invalidated_ids = (
+        _rollback_goal_ids(state, plan) if is_replan and structured else set()
+    )
     completed = (
         _preserve_completed_results(state=state, revised_plan=plan)
         if is_replan and structured
@@ -456,6 +723,7 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
     }
     return {
         "high_level_plan": plan.model_dump(mode="json"),
+        "final_output_goal_id": plan.final_output_goal_id,
         "structured_plan": structured,
         "completed_goal_results": completed,
         "approved_goal_artifacts": approved_artifacts,
@@ -465,7 +733,16 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
         "total_goal_count": len(plan.goals),
         "preserved_completed_count": len(completed_ids),
         "remaining_goal_count": len(plan.goals) - len(completed_ids),
-        "invalidated_goal_ids": [],
+        "invalidated_goal_ids": (
+            [
+                goal.goal_id
+                for goal in HighLevelPlan.model_validate(state["high_level_plan"]).goals
+                if goal.goal_id in invalidated_ids
+            ]
+            if invalidated_ids
+            else []
+        ),
+        "rollback_count": state.get("rollback_count", 0) + int(bool(invalidated_ids)),
         "new_goal_ids": [
             goal.goal_id
             for goal in plan.goals
@@ -521,6 +798,9 @@ def make_planner_repair_node(model: RoleModel) -> Node:
                     if state.get("planner_mode") == "scientific_replan"
                     else None
                 ),
+                answer_schema=state.get("answer_schema"),
+                required_output_paths=required_schema_paths(state.get("answer_schema")),
+                max_plan_goals=state.get("max_plan_goals", 6),
             ),
         )
         return {
@@ -541,12 +821,14 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
     """Select the next ordered goal without adding a scheduling architecture."""
     plan = HighLevelPlan.model_validate(state["high_level_plan"])
     index = state.get("current_goal_index", 0)
-    if index >= len(plan.goals):
-        raise RuntimeError("No remaining intermediate goal is available")
-    goal = plan.goals[index]
     completed_ids = {
         str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
     }
+    while index < len(plan.goals) and plan.goals[index].goal_id in completed_ids:
+        index += 1
+    if index >= len(plan.goals):
+        raise RuntimeError("No remaining intermediate goal is available")
+    goal = plan.goals[index]
     missing = [item for item in goal.depends_on if item not in completed_ids]
     if missing:
         raise RuntimeError(
@@ -554,6 +836,7 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         )
     return {
         "current_goal": goal.model_dump(mode="json"),
+        "current_goal_index": index,
         # A new goal (including a replanned one) starts a fresh mechanical budget.
         "code_repair_attempts_for_current_goal": 0,
         "code_repair_no_progress_count": 0,
@@ -565,6 +848,7 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         "current_generated_code": "",
         "execution_failure_category": None,
         "pending_goal_artifacts": [],
+        "executor_strategy_repair_count": 0,
     }
 
 
@@ -593,7 +877,17 @@ def _artifacts_available_to_current_goal(state: AgentState) -> list[GoalArtifact
     current = state.get("current_goal")
     if not isinstance(current, dict):
         return []
-    dependencies = {str(goal_id) for goal_id in current.get("depends_on", [])}
+    plan = HighLevelPlan.model_validate(state["high_level_plan"])
+    goals_by_id = {goal.goal_id: goal for goal in plan.goals}
+    dependencies: set[str] = set()
+    pending = [str(goal_id) for goal_id in current.get("depends_on", [])]
+    while pending:
+        goal_id = pending.pop()
+        if goal_id in dependencies:
+            continue
+        dependencies.add(goal_id)
+        if goal_id in goals_by_id:
+            pending.extend(goals_by_id[goal_id].depends_on)
     completed = {
         str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
     }
@@ -1004,6 +1298,22 @@ def _finalize_generated_attempt(
 ) -> dict[str, object]:
     """Project one execution or generation-contract failure into AgentState."""
     goal = IntermediateGoal.model_validate(state["current_goal"])
+    payload_error = _goal_result_limit_error(state, final.result)
+    if final.success and payload_error:
+        final = final.model_copy(
+            update={
+                "success": False,
+                "result": {},
+                "error": f"ResultContractError: {payload_error}",
+                "failure_category": "result_contract_error",
+                "parsed_result": False,
+            }
+        )
+    contract_escalation = _requires_contract_escalation(
+        state,
+        success=final.success,
+        error="\n".join([str(final.error or ""), final.stderr]),
+    )
     goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
     executions = [
         PythonExecutionResult.model_validate(item)
@@ -1058,14 +1368,26 @@ def _finalize_generated_attempt(
     failure_family = final.failure_category
     failure_fingerprint = _failure_fingerprint(final)
     if final.success:
+        exact_repetition_count = 0
         consecutive_family_count = 0
         failure_family = None
         failure_fingerprint = None
-    elif failure_fingerprint == state.get("consecutive_failure_fingerprint"):
-        consecutive_family_count = state.get("code_repair_no_progress_count", 0) + 1
     else:
-        consecutive_family_count = 1
-    no_progress = not final.success and consecutive_family_count >= no_progress_limit
+        exact_repetition_count = (
+            state.get("code_repair_no_progress_count", 0) + 1
+            if failure_fingerprint == state.get("consecutive_failure_fingerprint")
+            else 1
+        )
+        consecutive_family_count = (
+            state.get("consecutive_failure_family_count", 0) + 1
+            if failure_family == state.get("consecutive_failure_family")
+            else 1
+        )
+    family_limit = state.get("max_failure_family_attempts", 5)
+    no_progress = not final.success and (
+        exact_repetition_count >= no_progress_limit
+        or consecutive_family_count >= family_limit
+    )
     factual.update(
         {
             "normalized_failure_family": failure_family,
@@ -1130,11 +1452,13 @@ def _finalize_generated_attempt(
         + generated_script_increment,
         "code_repair_attempts_for_current_goal": repair_attempts,
         "max_code_repair_attempts": repair_limit,
-        "code_repair_no_progress_count": consecutive_family_count,
+        "code_repair_no_progress_count": exact_repetition_count,
+        "consecutive_failure_family_count": consecutive_family_count,
         "consecutive_failure_family": failure_family,
         "consecutive_failure_fingerprint": failure_fingerprint,
         "max_code_repair_no_progress_attempts": no_progress_limit,
         "code_repair_no_progress": no_progress,
+        "contract_escalation_required": contract_escalation,
         "trace": _trace(state, trace_event),
         "pending_goal_artifacts": [],
     }
@@ -1182,7 +1506,7 @@ def make_executor_node(
             question=state["question"],
             input_context=state["input_context"],
             current_goal=state["current_goal"],
-            completed_goal_results=list(state.get("completed_goal_results", [])),
+            completed_goal_results=_dependency_goal_results(state),
             verification_feedback=(
                 state.get("verification_feedback")
                 if state.get("verification_decision") == "REPLAN"
@@ -1192,18 +1516,33 @@ def make_executor_node(
             staged_file_paths=[str(path) for path in _allowed_paths(state)],
             approved_artifacts=_approved_artifact_context(state),
         )
-        raw_strategy = model.generate_structured(
-            role="executor",
-            messages=messages,
-            schema_name="executor_strategy",
-            schema=ExecutionStrategy.model_json_schema(),
-        )
+        strategy_error: Exception | None = None
+        raw_strategy = ""
         try:
+            raw_strategy = model.generate_structured(
+                role="executor",
+                messages=messages,
+                schema_name="executor_strategy",
+                schema=ExecutionStrategy.model_json_schema(),
+            )
             strategy = ExecutionStrategy.model_validate_json(raw_strategy)
-        except ValidationError as error:
-            raise ExecutorOutputError(
-                "Executor did not return a valid ExecutionStrategy"
-            ) from error
+        except (ValidationError, ProviderResponseError) as error:
+            strategy_error = error
+            repaired = model.generate_structured(
+                role="executor",
+                messages=build_executor_strategy_repair_messages(
+                    invalid_response=raw_strategy,
+                    validation_error=str(error),
+                ),
+                schema_name="executor_strategy_repair",
+                schema=ExecutionStrategy.model_json_schema(),
+            )
+            try:
+                strategy = ExecutionStrategy.model_validate_json(repaired)
+            except ValidationError as repair_error:
+                raise ExecutorOutputError(
+                    "Executor returned invalid ExecutionStrategy after one repair"
+                ) from repair_error
         normalization_warnings: list[str] = []
         if strategy.strategy == "generated_python" and (
             strategy.capability_name is not None or strategy.arguments
@@ -1234,6 +1573,15 @@ def make_executor_node(
                 error=tool_result.error,
                 artifact_paths=[],
             )
+            payload_error = _goal_result_limit_error(state, goal_result.result)
+            if goal_result.success and payload_error:
+                goal_result = goal_result.model_copy(
+                    update={
+                        "success": False,
+                        "result": {},
+                        "error": f"ResultContractError: {payload_error}",
+                    }
+                )
             execution_result = tool_result.model_dump_json()
             script_increment = 0
             repair_increment = 0
@@ -1248,6 +1596,11 @@ def make_executor_node(
                 goal_directory=str(goal_directory),
                 input_context=state["input_context"],
                 approved_artifacts=_approved_artifact_context(state),
+                result_schema=(
+                    state.get("answer_schema")
+                    if goal.goal_id == state.get("final_output_goal_id")
+                    else None
+                ),
             )
             contract, version, response_history, artifacts, contract_error = (
                 _python_contract_response(
@@ -1294,6 +1647,7 @@ def make_executor_node(
                     *state.get("executor_warnings", []),
                     *normalization_warnings,
                 ],
+                "executor_strategy_repair_count": int(strategy_error is not None),
                 **generated,
             }
 
@@ -1316,6 +1670,12 @@ def make_executor_node(
                 *state.get("executor_warnings", []),
                 *normalization_warnings,
             ],
+            "executor_strategy_repair_count": int(strategy_error is not None),
+            "contract_escalation_required": _requires_contract_escalation(
+                state,
+                success=goal_result.success,
+                error=goal_result.error,
+            ),
             "trace": _trace(state, "executor"),
         }
 
@@ -1349,6 +1709,11 @@ def make_mechanical_repair_node(
             completed_goal_results=_dependency_goal_results(state),
             repair_history=history,
             approved_artifacts=_approved_artifact_context(state),
+            result_schema=(
+                state.get("answer_schema")
+                if goal.goal_id == state.get("final_output_goal_id")
+                else None
+            ),
         )
         contract, version, response_history, artifacts, contract_error = (
             _python_contract_response(
@@ -1412,7 +1777,7 @@ def make_verifier_node(model: RoleModel) -> Node:
                 current_goal=state["current_goal"],
                 strategy=state.get("current_strategy", {}),
                 warnings=current_result.warnings,
-                prior_goal_results=list(state.get("completed_goal_results", [])),
+                prior_goal_results=_dependency_goal_results(state),
                 pending_artifacts=list(state.get("pending_goal_artifacts", [])),
             )
         else:
@@ -1489,11 +1854,16 @@ def make_verifier_node(model: RoleModel) -> Node:
                     ],
                 }
                 if output.decision == "PASS":
+                    goal_id = str(state["current_goal"]["goal_id"])
+                    retained_results = [
+                        item
+                        for item in state.get("completed_goal_results", [])
+                        if str(item.get("goal_id")) != goal_id
+                    ]
                     updates["completed_goal_results"] = [
-                        *state.get("completed_goal_results", []),
+                        *retained_results,
                         state["current_goal_result"],
                     ]
-                    goal_id = str(state["current_goal"]["goal_id"])
                     pending = [
                         GoalArtifact.model_validate(item)
                         for item in state.get("pending_goal_artifacts", [])
@@ -1555,6 +1925,8 @@ def make_final_answer_generator_node(provider: FinalOutputProvider) -> Node:
             verifier_feedback=state["verification_feedback"],
             iteration_history=list(state.get("iteration_history", [])),
             completed_goal_results=list(state.get("completed_goal_results", [])),
+            answer_schema=state.get("answer_schema"),
+            final_output_goal_id=state.get("final_output_goal_id"),
         )
         return {
             "raw_final_output": provider.generate(request),
@@ -1576,8 +1948,18 @@ def output_validator_node(state: AgentState) -> dict[str, object]:
     attempt = len(state.get("output_validation_history", [])) + 1
     try:
         parsed = json.loads(raw_output)
-        validated = FinalAnswer.model_validate(parsed)
-        validated_data = validated.model_dump(mode="json")
+        if state.get("answer_schema"):
+            validate_against_public_schema(parsed, state["answer_schema"])
+            validated_data = parsed
+            completion_status = (
+                str(parsed.get("status", "completed"))
+                if isinstance(parsed, dict)
+                else "completed"
+            )
+        else:
+            validated = FinalAnswer.model_validate(parsed)
+            validated_data = validated.model_dump(mode="json")
+            completion_status = validated.status
         final_answer = json.dumps(
             validated_data, ensure_ascii=False, indent=2, allow_nan=False
         )
@@ -1621,8 +2003,8 @@ def output_validator_node(state: AgentState) -> dict[str, object]:
             record,
         ],
         "final_answer": final_answer,
-        "status": validated.status,
-        "final_status": validated.status,
+        "status": completion_status,
+        "final_status": completion_status,
         "trace": _trace(state, "output_validator:VALID"),
     }
 
@@ -1632,7 +2014,15 @@ def make_output_repair_node(provider: FinalOutputProvider) -> Node:
 
     def output_repair(state: AgentState) -> dict[str, object]:
         approved_result = state["execution_result"]
-        if state.get("structured_plan", False):
+        if state.get("answer_schema"):
+            final_goal_id = state.get("final_output_goal_id")
+            matching = [
+                item.get("result", {})
+                for item in state.get("completed_goal_results", [])
+                if item.get("goal_id") == final_goal_id and item.get("success")
+            ]
+            approved_result = json.dumps(matching[0] if matching else {})
+        elif state.get("structured_plan", False):
             approved_result = json.dumps(
                 {"completed_goal_results": state.get("completed_goal_results", [])},
                 ensure_ascii=False,
@@ -1640,7 +2030,8 @@ def make_output_repair_node(provider: FinalOutputProvider) -> Node:
         request = OutputRepairRequest(
             invalid_raw_output=state["raw_final_output"],
             validation_error=state["output_validation_error"],
-            required_schema=FinalAnswer.model_json_schema(),
+            required_schema=state.get("answer_schema")
+            or FinalAnswer.model_json_schema(),
             approved_execution_result=approved_result,
         )
         return {

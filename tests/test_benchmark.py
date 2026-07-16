@@ -404,12 +404,18 @@ def _wrong_agent_factory(approach, public):
                 {
                     "goal_id": "calculate",
                     "objective": "Compute the requested statistic.",
-                    "required_outputs": ["mean_absolute_successive_difference"],
+                    "required_outputs": [
+                        "status",
+                        "answer",
+                        "key_results.mean_absolute_successive_difference",
+                        "limitations",
+                    ],
                     "constraints": [],
                     "success_criteria": ["Report it."],
                     "depends_on": [],
                 }
             ],
+            "final_output_goal_id": "calculate",
         }
     )
     strategy = json.dumps(
@@ -420,7 +426,11 @@ def _wrong_agent_factory(approach, public):
             "concise_reason": "Generate code.",
         }
     )
-    code = "__agent_result__ = {'mean_absolute_successive_difference': 3.0}\n"
+    code = (
+        "__agent_result__ = {'status': 'completed', 'answer': 'done', "
+        "'key_results': {'mean_absolute_successive_difference': 3.0}, "
+        "'limitations': []}\n"
+    )
     generation = json.dumps(
         {
             "kind": "python",
@@ -506,6 +516,7 @@ def test_agent_generated_python_receives_usable_relative_public_paths(
                     "depends_on": [],
                 }
             ],
+            "final_output_goal_id": "read_inputs",
         }
     )
     strategy = json.dumps(

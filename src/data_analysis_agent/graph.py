@@ -13,6 +13,7 @@ from data_analysis_agent.final_output import (
 )
 from data_analysis_agent.models import RoleModel
 from data_analysis_agent.nodes import (
+    contract_escalation_node,
     make_executor_node,
     make_final_answer_generator_node,
     make_mechanical_repair_node,
@@ -65,18 +66,24 @@ def route_after_verification(
 
 def route_after_execution(
     state: AgentState,
-) -> Literal["verifier", "mechanical_repair", "mechanical_failure"]:
+) -> Literal[
+    "verifier", "mechanical_repair", "contract_escalation", "mechanical_failure"
+]:
     """Only successful generated executions may reach scientific verification."""
-    strategy = state.get("current_strategy", {}).get("strategy")
-    if strategy != "generated_python":
-        return "verifier"
     result = state.get("current_goal_result")
     if result and result.get("success"):
         return "verifier"
+    if state.get("contract_escalation_required") and state.get(
+        "replan_count", 0
+    ) < state.get("max_replans", 1):
+        return "contract_escalation"
+    strategy = state.get("current_strategy", {}).get("strategy")
+    if strategy != "generated_python":
+        return "mechanical_failure"
     if state.get("code_repair_no_progress"):
         return "mechanical_failure"
     if state.get("code_repair_attempts_for_current_goal", 0) < state.get(
-        "max_code_repair_attempts", 50
+        "max_code_repair_attempts", 8
     ):
         return "mechanical_repair"
     return "mechanical_failure"
@@ -133,6 +140,7 @@ def build_graph(
     workflow.add_node("select_current_goal", select_current_goal_node)
     workflow.add_node("executor", make_executor_node(model, runner))
     workflow.add_node("mechanical_repair", make_mechanical_repair_node(model, runner))
+    workflow.add_node("contract_escalation", contract_escalation_node)
     workflow.add_node("verifier", make_verifier_node(model))
     workflow.add_node(
         "final_answer_generator",
@@ -169,6 +177,7 @@ def build_graph(
         {
             "verifier": "verifier",
             "mechanical_repair": "mechanical_repair",
+            "contract_escalation": "contract_escalation",
             "mechanical_failure": "mechanical_failure",
         },
     )
@@ -178,9 +187,11 @@ def build_graph(
         {
             "verifier": "verifier",
             "mechanical_repair": "mechanical_repair",
+            "contract_escalation": "contract_escalation",
             "mechanical_failure": "mechanical_failure",
         },
     )
+    workflow.add_edge("contract_escalation", "planner")
     workflow.add_conditional_edges(
         "verifier",
         route_after_verification,

@@ -318,7 +318,7 @@ def test_distinct_result_contract_fingerprints_do_not_trigger_no_progress(
     assert [item["consecutive_failure_family_count"] for item in records] == [
         1,
         2,
-        1,
+        3,
     ]
     assert (
         records[0]["normalized_failure_fingerprint"]

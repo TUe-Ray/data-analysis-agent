@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import time
 from collections.abc import Callable
@@ -17,7 +19,10 @@ from data_analysis_agent.benchmark_types import (
     BenchmarkConfig,
     PublicTaskView,
 )
-from data_analysis_agent.config import code_repair_settings
+from data_analysis_agent.config import (
+    code_repair_settings,
+    full_agent_reliability_settings,
+)
 from data_analysis_agent.demo import write_workflow_log
 from data_analysis_agent.final_output import DeterministicFinalOutputProvider
 from data_analysis_agent.graph import build_graph
@@ -27,6 +32,9 @@ from data_analysis_agent.models import (
     RoleModel,
 )
 from data_analysis_agent.prompts import build_python_repair_messages
+from data_analysis_agent.public_schema import (
+    validate_against_public_schema as _validate_against_public_schema,
+)
 from data_analysis_agent.python_runner import LocalPythonRunner, PythonExecutionResult
 from data_analysis_agent.schemas import (
     FinalCheckerOutput,
@@ -560,52 +568,6 @@ def run_one_shot_code(
     )
 
 
-def _validate_against_public_schema(
-    value: object, schema: object, path: str = "$"
-) -> None:
-    """Validate the repository's JSON-Schema subset without private grader access."""
-    if not isinstance(schema, dict):
-        return
-    enum = schema.get("enum")
-    if isinstance(enum, list) and value not in enum:
-        raise ValueError(f"{path} must be one of {enum}")
-    kind = schema.get("type")
-    if kind == "object":
-        if not isinstance(value, dict):
-            raise ValueError(f"{path} must be an object")
-        required = schema.get("required", [])
-        if isinstance(required, list):
-            missing = [item for item in required if item not in value]
-            if missing:
-                raise ValueError(f"{path} is missing required field(s): {missing}")
-        properties = schema.get("properties", {})
-        if not isinstance(properties, dict):
-            properties = {}
-        if schema.get("additionalProperties") is False:
-            unexpected = [key for key in value if key not in properties]
-            if unexpected:
-                raise ValueError(f"{path} has unexpected field(s): {unexpected}")
-        for key, nested_schema in properties.items():
-            if key in value:
-                _validate_against_public_schema(
-                    value[key], nested_schema, f"{path}.{key}"
-                )
-    elif kind == "array":
-        if not isinstance(value, list):
-            raise ValueError(f"{path} must be an array")
-        item_schema = schema.get("items")
-        for index, item in enumerate(value):
-            _validate_against_public_schema(item, item_schema, f"{path}[{index}]")
-    elif kind == "string" and not isinstance(value, str):
-        raise ValueError(f"{path} must be a string")
-    elif kind == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
-        raise ValueError(f"{path} must be an integer")
-    elif kind == "number" and (
-        not isinstance(value, (int, float)) or isinstance(value, bool)
-    ):
-        raise ValueError(f"{path} must be a number")
-
-
 def _single_agent_status(execution: PythonExecutionResult | None) -> str:
     """Map shared runner facts to the benchmark's public attempt status."""
     if execution is None:
@@ -827,14 +789,72 @@ def run_single_agent_checker(
     )
 
 
-def _agent_input_context(public: PublicTaskView) -> str:
-    sections = []
+def _profile_scalar_type(values: list[str]) -> str:
+    """Infer a deliberately small, model-facing scalar type."""
+    present = [value for value in values if value.strip()]
+    if not present:
+        return "unknown"
+    try:
+        for value in present:
+            int(value)
+        return "integer"
+    except ValueError:
+        pass
+    try:
+        for value in present:
+            float(value)
+        return "number"
+    except ValueError:
+        return "string"
+
+
+def _agent_input_profile(public: PublicTaskView) -> dict[str, JsonValue]:
+    """Summarize public inputs without repeating complete datasets in prompts."""
+    files: list[dict[str, JsonValue]] = []
     for path in public.data_files:
         key = _content_key(public, path)
-        sections.append(
-            f"File: {Path(path).name}\n{public.data_contents[key].rstrip()}"
+        content = public.data_contents[key]
+        if Path(path).suffix.lower() != ".csv":
+            files.append(
+                {
+                    "filename": path,
+                    "format": Path(path).suffix.lower().lstrip(".") or "text",
+                    "character_count": len(content),
+                    "preview": content[:500],
+                }
+            )
+            continue
+        reader = csv.DictReader(io.StringIO(content))
+        rows = list(reader)
+        columns = list(reader.fieldnames or [])
+        files.append(
+            {
+                "filename": path,
+                "format": "csv",
+                "row_count": len(rows),
+                "columns": [
+                    {
+                        "name": column,
+                        "inferred_type": _profile_scalar_type(
+                            [str(row.get(column, "")) for row in rows]
+                        ),
+                        "missing_count": sum(
+                            not str(row.get(column, "")).strip() for row in rows
+                        ),
+                    }
+                    for column in columns
+                ],
+                "preview": [
+                    {column: row.get(column, "") for column in columns}
+                    for row in rows[:3]
+                ],
+            }
         )
-    return "\n\n".join(sections)
+    return {"files": files}
+
+
+def _agent_input_context(public: PublicTaskView) -> str:
+    return json.dumps(_agent_input_profile(public), ensure_ascii=False, indent=2)
 
 
 def run_agent(
@@ -846,7 +866,12 @@ def run_agent(
     progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Invoke the existing full Planner/Executor/Verifier workflow from scratch."""
-    recorder = RecordingRoleModel(model, _model_observer(progress))
+    reliability = full_agent_reliability_settings()
+    recorder = RecordingRoleModel(
+        model,
+        _model_observer(progress),
+        max_calls=reliability["max_model_calls"],
+    )
     agent_directory = run_directory / "agent_run"
     exception_class = None
     workflow_started = time.perf_counter()
@@ -862,6 +887,11 @@ def run_agent(
             "staged_file_paths": [str(path) for path in staged_files],
             "staged_file_display_paths": list(public.data_files),
             "input_context": _agent_input_context(public),
+            "input_profile": _agent_input_profile(public),
+            "answer_schema": public.answer_schema,
+            **reliability,
+            "contract_escalated_goal_ids": [],
+            "rollback_count": 0,
             "run_directory": str(agent_directory),
             "replan_count": 0,
             "max_replans": config.max_replans,
@@ -1056,7 +1086,8 @@ def run_agent(
         workflow_status = str(result.get("status"))
         status = (
             "completed"
-            if workflow_status == "completed" or partial_reached
+            if workflow_status in {"completed", "completed_with_limitations"}
+            or partial_reached
             else "python_policy_failure"
             if workflow_status == "python_policy_failure"
             else "error"

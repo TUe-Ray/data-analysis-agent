@@ -19,12 +19,19 @@ JSON-compatible facts (for example counts, finite statistics, or concise status
 facts) or explicitly declared analysis artifacts. Never require an in-memory
 DataFrame, Series, array, or other Python object to appear in a goal result; a
 tabular intermediate belongs in a declared artifact after its producing goal is
-verified. A scientific replan must return the full workflow, including every
-completed goal unchanged. Never reuse a completed goal_id for a new definition.
+verified. A scientific replan must return the full workflow. Keep completed goals
+unchanged unless invalidate_from_goal_id explicitly requests one bounded rollback;
+the workflow invalidates only that goal and its dependency descendants. Never
+reuse a retained completed goal_id for a new definition.
 When a revised goal needs a prior approved artifact, explicitly list its producer
 goal_id in depends_on; artifacts are not otherwise available. If a goal text
 mentions a prior goal_id, include that exact goal_id in depends_on. A goal receives
-JSON results from all declared dependencies and their upstream dependencies."""
+JSON results from all declared dependencies and their upstream dependencies.
+When a public answer schema is supplied, set final_output_goal_id to the last goal.
+That final assembly goal's dependency closure must include every earlier goal and
+produce one complete answer object matching every required public-schema section;
+intermediate goals must
+produce only facts or declared artifacts, never partial final-answer wrappers."""
 
 PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid scientific
 HighLevelPlan response. Return exactly one JSON object matching the required
@@ -34,10 +41,11 @@ must name an existing goal_id that appears earlier in the goals list. Do not
 calculate results or add implementation details, code, tools, or file paths. Do
 not remove required task outputs merely to make the structure valid. Express
 required outputs as JSON-compatible facts or declared analysis artifacts, never as
-in-memory DataFrames, Series, arrays, or other Python objects. When immutable
-completed goal definitions are supplied, this is a scientific-replan repair:
-return the complete workflow, copy every supplied completed goal definition
-unchanged, and retain the remaining goals. Do not return only the remaining goals
+in-memory DataFrames, Series, arrays, or other Python objects. When completed goal
+definitions are supplied, this is a scientific-replan repair: return the complete
+workflow, copy every retained completed goal definition unchanged, and retain the
+remaining goals. Only invalidate_from_goal_id may request bounded rollback. Do not
+return only the remaining goals
 or use a completed goal_id for a changed definition. Repair the supplied invalid
 response's structure; do not perform another scientific replan."""
 
@@ -151,13 +159,26 @@ def build_planner_messages(
     completed_goal_fingerprints: dict[str, str] | None = None,
     approved_artifacts: list[dict[str, JsonValue]] | None = None,
     current_goal_failure: dict[str, JsonValue] | None = None,
+    answer_schema: dict[str, JsonValue] | None = None,
+    required_output_paths: list[str] | None = None,
+    max_plan_goals: int = 6,
 ) -> list[dict[str, str]]:
     """Build global planning context without Executor histories or hidden thought."""
     parts = [
         f"Question:\n{question}",
         f"Input context and staged-file metadata:\n{input_context}",
         f"Current replan count: {replan_count}",
+        f"Maximum high-level goals (including final assembly): {max_plan_goals}",
     ]
+    if answer_schema:
+        parts.extend(
+            [
+                "Exact public answer schema:\n"
+                + json.dumps(answer_schema, ensure_ascii=False),
+                "Required public output paths that final assembly must cover:\n"
+                + json.dumps(required_output_paths or [], ensure_ascii=False),
+            ]
+        )
     if previous_plan is not None:
         parts.append(f"Previous high-level plan:\n{json.dumps(previous_plan)}")
     if completed_goal_results:
@@ -191,7 +212,9 @@ def build_planner_messages(
         '{"scientific_objective":"string","goals":[{"goal_id":"string",'
         '"objective":"string","required_outputs":["string"],'
         '"constraints":["string"],"success_criteria":["string"],'
-        '"depends_on":["earlier_goal_id"]}]}'
+        '"depends_on":["earlier_goal_id"]}],'
+        '"final_output_goal_id":"last_goal_id",'
+        '"invalidate_from_goal_id":null}'
     )
     return [
         {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
@@ -208,13 +231,18 @@ def build_planner_repair_messages(
     completed_goal_fingerprints: dict[str, str] | None = None,
     completed_goal_definitions: list[dict[str, JsonValue]] | None = None,
     approved_artifacts: list[dict[str, JsonValue]] | None = None,
+    answer_schema: dict[str, JsonValue] | None = None,
+    required_output_paths: list[str] | None = None,
+    max_plan_goals: int = 6,
 ) -> list[dict[str, str]]:
     """Build a compact structural-only repair request for Planner output."""
     schema_summary = (
         '{"scientific_objective":"string","goals":[{"goal_id":"string",'
         '"objective":"string","required_outputs":["string"],'
         '"constraints":["string"],"success_criteria":["string"],'
-        '"depends_on":["earlier_goal_id"]}]}'
+        '"depends_on":["earlier_goal_id"]}],'
+        '"final_output_goal_id":"last_goal_id",'
+        '"invalidate_from_goal_id":null}'
     )
     return [
         {"role": "system", "content": PLANNER_REPAIR_SYSTEM_PROMPT},
@@ -252,10 +280,38 @@ def build_planner_repair_messages(
                     else ""
                 )
                 + f"HighLevelPlan JSON schema summary:\n{schema_summary}\n\n"
+                + f"Maximum goals: {max_plan_goals}\n\n"
+                + (
+                    "Exact public answer schema:\n"
+                    f"{json.dumps(answer_schema, ensure_ascii=False)}\n\n"
+                    "Required final output paths:\n"
+                    f"{json.dumps(required_output_paths or [])}\n\n"
+                    if answer_schema
+                    else ""
+                )
                 + "Dependency rule: every depends_on item must exactly match an "
                 "existing earlier goal_id; forward and missing dependencies are "
                 "invalid. Return the complete repaired workflow, never only its "
                 "uncompleted suffix."
+            ),
+        },
+    ]
+
+
+def build_executor_strategy_repair_messages(
+    *, invalid_response: str, validation_error: str
+) -> list[dict[str, str]]:
+    """Request one structural-only correction of an Executor strategy."""
+    return [
+        {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "Repair only the malformed ExecutionStrategy JSON below. Return "
+                "one object with exactly strategy, capability_name, arguments, "
+                "and concise_reason. Do not revise the scientific goal.\n\n"
+                f"Invalid response:\n{invalid_response}\n\n"
+                f"Validation error:\n{validation_error}"
             ),
         },
     ]
@@ -309,6 +365,7 @@ def build_python_generation_messages(
     goal_directory: str,
     input_context: str = "",
     approved_artifacts: list[dict[str, object]] | None = None,
+    result_schema: dict[str, JsonValue] | None = None,
 ) -> list[dict[str, str]]:
     """Supply generated-code creation only the current factual execution context."""
     return [
@@ -335,6 +392,9 @@ def build_python_generation_messages(
                 f"{json.dumps(completed_goal_results)}\n\n"
                 "Verifier-approved prerequisite artifacts:\n"
                 f"{json.dumps(approved_artifacts or [])}\n\n"
+                "Exact required result schema for this goal (null means only the "
+                "goal contract applies):\n"
+                f"{json.dumps(result_schema, ensure_ascii=False)}\n\n"
                 f"Assigned goal directory and process cwd:\n{goal_directory}\n\n"
                 "Assign exactly one JSON-compatible object to __agent_result__. "
                 "The trusted runner serializes it with allow_nan=False.\n\n"
@@ -359,6 +419,7 @@ def build_python_repair_messages(
     completed_goal_results: list[dict[str, JsonValue]] | None = None,
     repair_history: list[dict[str, object]] | None = None,
     approved_artifacts: list[dict[str, object]] | None = None,
+    result_schema: dict[str, JsonValue] | None = None,
 ) -> list[dict[str, str]]:
     """Supply repair only the fixed goal, code, local failure, and allowlist."""
     return [
@@ -391,6 +452,8 @@ def build_python_repair_messages(
                 f"{json.dumps(completed_goal_results or [])}\n\n"
                 "Verifier-approved prerequisite artifacts:\n"
                 f"{json.dumps(approved_artifacts or [])}\n\n"
+                "Exact required result schema for this goal:\n"
+                f"{json.dumps(result_schema, ensure_ascii=False)}\n\n"
                 f"Allowed output directory and process cwd:\n{goal_directory}\n\n"
                 "Recent compact repair history:\n"
                 f"{json.dumps(repair_history or [], ensure_ascii=False)}\n\n"

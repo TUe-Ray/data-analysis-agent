@@ -38,9 +38,14 @@ Set `NEBIUS_API_KEY` to your Nebius Token Factory API key and `NEBIUS_MODEL` to
 the model you want to use. `NEBIUS_BASE_URL` defaults to
 `https://api.tokenfactory.nebius.com/v1/` and can be overridden when needed.
 `MAX_CODE_REPAIR_ATTEMPTS` controls bounded mechanical generated-code repairs
-(default `50`); `CODE_REPAIR_NO_PROGRESS_ATTEMPTS` controls the repeated-error
+(default `8`); `CODE_REPAIR_NO_PROGRESS_ATTEMPTS` controls the exact repeated-error
 early-stop threshold (default `3`). `MAX_PLANNER_REPAIR_ATTEMPTS` controls
-bounded structural Planner-response repairs (default `2`).
+bounded structural Planner-response repairs (default `3`). Full-agent safety
+limits are also configurable with `MAX_PLAN_GOALS` (default `6`),
+`MAX_GOAL_RESULT_BYTES` (`262144`), `MAX_GOAL_RESULT_LIST_LENGTH` (`100`),
+`MAX_GOAL_RESULT_DEPTH` (`10`), `MAX_FAILURE_FAMILY_ATTEMPTS` (`5`),
+`MAX_MODEL_CALLS` (`80`), `MAX_GOAL_ROLLBACKS` (`1`), and
+`MAX_ROLLBACK_GOALS` (`6`).
 Never commit `.env` or its API key.
 
 ## Commands

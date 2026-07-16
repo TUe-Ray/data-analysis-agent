@@ -5,6 +5,7 @@ from data_analysis_agent.config import (
     DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS,
     DEFAULT_NEBIUS_BASE_URL,
     ConfigurationError,
+    full_agent_reliability_settings,
     load_settings,
 )
 
@@ -65,7 +66,21 @@ def test_load_settings_reads_planner_repair_limit(
     monkeypatch.setenv("MAX_PLANNER_REPAIR_ATTEMPTS", "4")
 
     assert load_settings(load_dotenv_file=False).max_planner_repair_attempts == 4
-    assert DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS == 2
+    assert DEFAULT_MAX_PLANNER_REPAIR_ATTEMPTS == 3
+
+
+def test_full_agent_reliability_limits_are_environment_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAX_PLAN_GOALS", "5")
+    monkeypatch.setenv("MAX_GOAL_RESULT_BYTES", "4096")
+    monkeypatch.setenv("MAX_MODEL_CALLS", "25")
+
+    settings = full_agent_reliability_settings()
+
+    assert settings["max_plan_goals"] == 5
+    assert settings["max_goal_result_bytes"] == 4096
+    assert settings["max_model_calls"] == 25
 
 
 def test_load_settings_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

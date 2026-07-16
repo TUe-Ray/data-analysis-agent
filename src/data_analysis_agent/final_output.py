@@ -23,6 +23,8 @@ class FinalGenerationRequest:
     verifier_feedback: str
     iteration_history: list[IterationRecord]
     completed_goal_results: list[dict[str, JsonValue]] = field(default_factory=list)
+    answer_schema: dict[str, JsonValue] | None = None
+    final_output_goal_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,9 +97,15 @@ def _approved_structured_values(
                 for name, value in statistics_result.items():
                     output_name = "n_observations" if name == "count" else name
                     key_results[output_name] = value
-        elif goal_result.get("strategy") == "generated_python":
-            if "legacy_execution_result" not in result:
-                key_results.update(result)
+    generated = [
+        item
+        for item in completed_goal_results
+        if item.get("success") and item.get("strategy") == "generated_python"
+    ]
+    if generated:
+        result = generated[-1].get("result", {})
+        if isinstance(result, dict) and "legacy_execution_result" not in result:
+            key_results = dict(result)
     return key_results, list(dict.fromkeys(limitations))
 
 
@@ -143,13 +151,38 @@ class DeterministicFinalOutputProvider:
     """Format approved content without asking a model to judge or recalculate it."""
 
     def generate(self, request: FinalGenerationRequest) -> str:
+        if request.answer_schema is not None:
+            matches = [
+                item
+                for item in request.completed_goal_results
+                if item.get("goal_id") == request.final_output_goal_id
+                and item.get("success")
+            ]
+            if len(matches) != 1:
+                return json.dumps(
+                    {"assembly_error": "verified final assembly result is missing"}
+                )
+            return json.dumps(
+                matches[0].get("result", {}),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
         return _serialize_approved_result(
             request.approved_execution_result,
             request.completed_goal_results,
         )
 
     def repair(self, request: OutputRepairRequest) -> str:
-        return _serialize_approved_result(request.approved_execution_result)
+        try:
+            parsed = json.loads(request.approved_execution_result)
+        except json.JSONDecodeError:
+            return _serialize_approved_result(request.approved_execution_result)
+        if isinstance(parsed, dict) and isinstance(
+            parsed.get("completed_goal_results"), list
+        ):
+            return _serialize_approved_result(request.approved_execution_result)
+        return json.dumps(parsed, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 class ScriptedFinalOutputProvider:
