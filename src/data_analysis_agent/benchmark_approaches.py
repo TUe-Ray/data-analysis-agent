@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 import time
 from collections.abc import Callable
@@ -13,12 +11,16 @@ from typing import cast
 
 from pydantic import JsonValue, ValidationError
 
+from data_analysis_agent.benchmark_context import build_public_analysis_context
 from data_analysis_agent.benchmark_progress import ProgressCallback, ProgressEvent
 from data_analysis_agent.benchmark_types import (
     Approach,
     ApproachOutcome,
     BenchmarkConfig,
     PublicTaskView,
+)
+from data_analysis_agent.candidate_consistency import (
+    build_candidate_consistency_evidence,
 )
 from data_analysis_agent.config import (
     code_repair_settings,
@@ -85,17 +87,18 @@ For exact duplicate removal, use len(original_rows) - len(deduplicated_rows), th
 continue analysis with the deduplicated rows."""
 
 FINAL_CHECKER_SYSTEM_PROMPT = """You are an independent final completeness
-checker. Assess the public task, public answer schema, candidate answer, factual
-execution result, artifact summary, and limitations. Return exactly one
-FinalCheckerOutput JSON object. Return PASS only if the candidate is complete and
-supported by an independent cross-check of the supplied public data; matching
-execution output alone is not evidence of correctness. Verify explicit sequential
-rules and removal counts from the raw input before passing. For exact duplicate
-removal, independently check raw_row_count - deduplicated_row_count. Return REPAIR with
+checker. Assess the public specification documents, compact input profiles,
+candidate answer, factual execution result, deterministic candidate-internal
+consistency evidence, artifact summary, and limitations. Return exactly one
+FinalCheckerOutput JSON object. Return PASS only if the candidate is complete,
+consistent, and supported by the supplied evidence; matching execution output
+alone is not evidence of correctness. The consistency evidence is derived from the
+candidate and is not an independent raw-data reconstruction. Verify explicit
+sequential rules, removal-count identities, statistical definitions, and document
+precedence to the extent supported by the bounded evidence. Return REPAIR with
 concise actionable feedback and repair_scope="format_only" for representation-only
-issues or
-"rerun_analysis" for any scientific/data-analysis correction. You do not write
-code and are called exactly once."""
+issues or "rerun_analysis" for any scientific/data-analysis correction. You do not
+write code and are called exactly once."""
 
 
 def build_direct_answer_messages(public: PublicTaskView) -> list[dict[str, str]]:
@@ -120,17 +123,18 @@ def build_direct_answer_messages(public: PublicTaskView) -> list[dict[str, str]]
     ]
 
 
-def build_one_shot_code_messages(public: PublicTaskView) -> list[dict[str, str]]:
+def build_one_shot_code_messages(
+    public: PublicTaskView,
+    analysis_context: dict[str, JsonValue] | None = None,
+) -> list[dict[str, str]]:
     """Describe only public staged inputs and the shared prompt/schema."""
-    descriptions = [
-        {"filename": Path(path).name, "staged_path": path} for path in public.data_files
-    ]
+    context = analysis_context or _agent_input_profile(public)
     user = (
-        f"Task ID: {public.task_id}\n\nTask prompt:\n{public.prompt}\n\n"
-        "Public answer schema:\n"
-        f"{json.dumps(public.answer_schema, ensure_ascii=False)}\n\n"
-        "Staged public data files:\n"
-        f"{json.dumps(descriptions, ensure_ascii=False)}"
+        f"Task prompt:\n{public.prompt}\n\n"
+        "Shared public analysis context (complete specification documents, compact "
+        "CSV profiles, and exact staged paths):\n"
+        f"{json.dumps(context, ensure_ascii=False)}\n\n"
+        "Use exact staged_path values directly as Python string literals."
     )
     return [
         {"role": "system", "content": ONE_SHOT_CODE_SYSTEM_PROMPT},
@@ -139,16 +143,22 @@ def build_one_shot_code_messages(public: PublicTaskView) -> list[dict[str, str]]
 
 
 def build_single_agent_messages(
-    public: PublicTaskView, run_directory: Path, staged_files: list[Path]
+    public: PublicTaskView,
+    run_directory: Path,
+    staged_files: list[Path],
+    analysis_context: dict[str, JsonValue] | None = None,
 ) -> list[dict[str, str]]:
     """Give the ablation's sole analysis agent the same public task boundary."""
+    context = analysis_context or build_public_analysis_context(public, staged_files)
     return [
         {"role": "system", "content": SINGLE_AGENT_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
-                f"Task ID: {public.task_id}\n\nTask prompt:\n{public.prompt}\n\n"
-                f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                f"Task prompt:\n{public.prompt}\n\n"
+                "Shared public analysis context (complete specification documents, "
+                "compact CSV profiles, and exact staged paths):\n"
+                f"{json.dumps(context, ensure_ascii=False)}\n\n"
                 "Process current working directory (cwd):\n"
                 f"{run_directory.resolve()}\n\n"
                 "Allowed staged input paths (absolute paths; use these exact paths "
@@ -167,27 +177,24 @@ def build_final_checker_messages(
     public: PublicTaskView,
     candidate: dict[str, JsonValue],
     execution: dict[str, JsonValue],
+    analysis_context: dict[str, JsonValue] | None = None,
 ) -> list[dict[str, str]]:
-    """Keep final checking independent from the single-agent role history."""
-    input_sections = []
-    for name in public.data_files:
-        key = _content_key(public, name)
-        input_sections.append(
-            f"----- BEGIN FILE: {Path(name).name} -----\n"
-            f"{public.data_contents[key].rstrip()}\n"
-            f"----- END FILE: {Path(name).name} -----"
-        )
+    """Keep checking independent while bounding raw public-data context."""
+    context = analysis_context or _agent_input_profile(public)
+    consistency = build_candidate_consistency_evidence(candidate)
     return [
         {"role": "system", "content": FINAL_CHECKER_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
-                f"Task prompt:\n{public.prompt}\n\n"
-                f"Public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
-                "Public input data (cross-check numerical claims against these "
-                "files):\n" + "\n\n".join(input_sections) + "\n\n"
+                "Shared public analysis context (complete specification documents "
+                "and compact CSV profiles; raw scientific CSV rows are not embedded):\n"
+                f"{json.dumps(context, ensure_ascii=False)}\n\n"
                 f"Final candidate answer:\n{json.dumps(candidate)}\n\n"
                 f"Factual execution result:\n{json.dumps(execution)}\n\n"
+                "Candidate-internal consistency evidence (not an independent raw-data "
+                "reconstruction):\n"
+                f"{json.dumps(consistency, ensure_ascii=False)}\n\n"
                 "Artifacts and limitations: no unregistered artifacts; the candidate's "
                 "limitations field is authoritative."
             ),
@@ -230,8 +237,10 @@ def build_single_agent_checker_repair_messages(
     repair_scope: str,
     staged_files: list[Path],
     execution_directory: Path,
+    analysis_context: dict[str, JsonValue] | None = None,
 ) -> list[dict[str, str]]:
     """Request a checker-directed repair that is grounded in a second execution."""
+    context = analysis_context or build_public_analysis_context(public, staged_files)
     return [
         {
             "role": "system",
@@ -248,8 +257,8 @@ def build_single_agent_checker_repair_messages(
         {
             "role": "user",
             "content": (
-                f"Original task:\n{public.prompt}\n\n"
-                f"Exact public answer schema:\n{json.dumps(public.answer_schema)}\n\n"
+                "Shared public analysis context:\n"
+                f"{json.dumps(context, ensure_ascii=False)}\n\n"
                 "Process cwd / assigned execution directory:\n"
                 f"{execution_directory.resolve()}\n\n"
                 "Allowed absolute staged input paths (use directly as string literals; "
@@ -498,8 +507,11 @@ def run_one_shot_code(
     execution = None
     exception_class = None
     try:
+        staged_files = _resolved_public_files(public, run_directory)
+        analysis_context = build_public_analysis_context(public, staged_files)
         raw = recorder.generate(
-            role="one_shot_code", messages=build_one_shot_code_messages(public)
+            role="one_shot_code",
+            messages=build_one_shot_code_messages(public, analysis_context),
         )
         (run_directory / "raw_code_response.txt").write_text(raw, encoding="utf-8")
         code = _extract_code(raw)
@@ -515,7 +527,7 @@ def run_one_shot_code(
         ).run(
             code=code,
             goal_directory=run_directory / "execution",
-            allowed_files=_resolved_public_files(public, run_directory),
+            allowed_files=staged_files,
             version=1,
             working_directory=run_directory,
             result_mode="legacy_stdout",
@@ -587,6 +599,7 @@ class _SingleAgentCoreResult:
     recorder: RecordingRoleModel
     execution_directory: Path
     staged_files: list[Path]
+    analysis_context: dict[str, JsonValue]
     runner: LocalPythonRunner
     execution: PythonExecutionResult | None
     source: str
@@ -614,6 +627,7 @@ def _run_iterative_single_agent_core(
     recorder = RecordingRoleModel(model, _model_observer(progress))
     execution_directory = run_directory / "single_agent_run"
     staged_files = _resolved_public_files(public, run_directory)
+    analysis_context = build_public_analysis_context(public, staged_files)
     goal = IntermediateGoal(
         goal_id="single_analysis",
         objective="Produce the complete public answer-schema object.",
@@ -645,7 +659,10 @@ def _run_iterative_single_agent_core(
                 raw = recorder.generate_structured(
                     role="single_agent",
                     messages=build_single_agent_messages(
-                        public, execution_directory, staged_files
+                        public,
+                        execution_directory,
+                        staged_files,
+                        analysis_context,
                     ),
                     schema_name="single_agent_python_generation",
                     schema=PythonGeneration.model_json_schema(),
@@ -673,7 +690,9 @@ def _run_iterative_single_agent_core(
                         error=previous.error if previous else error,
                         staged_file_paths=[str(path) for path in staged_files],
                         goal_directory=str(execution_directory),
-                        input_context=_agent_input_context(public),
+                        input_context=json.dumps(
+                            analysis_context, ensure_ascii=False, indent=2
+                        ),
                         repair_history=[],
                     ),
                     schema_name="single_agent_python_repair",
@@ -727,6 +746,7 @@ def _run_iterative_single_agent_core(
         recorder=recorder,
         execution_directory=execution_directory,
         staged_files=staged_files,
+        analysis_context=analysis_context,
         runner=runner,
         execution=execution,
         source=source,
@@ -808,6 +828,7 @@ def run_single_agent_checker(
                 public=public,
                 candidate=core.candidate,
                 execution=core.execution.model_dump(mode="json"),
+                analysis_context=core.analysis_context,
             ),
             schema_name="single_agent_final_checker",
             schema=FinalCheckerOutput.model_json_schema(),
@@ -829,6 +850,7 @@ def run_single_agent_checker(
                     repair_scope=checker.repair_scope,
                     staged_files=core.staged_files,
                     execution_directory=core.execution_directory,
+                    analysis_context=core.analysis_context,
                 ),
                 schema_name="single_agent_checker_python_repair",
                 schema=PythonRepair.model_json_schema(),
@@ -892,94 +914,21 @@ def run_single_agent(
     return _single_agent_outcome(core)
 
 
-def _profile_scalar_type(values: list[str]) -> str:
-    """Infer a deliberately small, model-facing scalar type."""
-    present = [value for value in values if value.strip()]
-    if not present:
-        return "unknown"
-    try:
-        for value in present:
-            int(value)
-        return "integer"
-    except ValueError:
-        pass
-    try:
-        for value in present:
-            float(value)
-        return "number"
-    except ValueError:
-        return "string"
-
-
 def _agent_input_profile(public: PublicTaskView) -> dict[str, JsonValue]:
-    """Summarize public inputs without repeating complete datasets in prompts."""
-    files: list[dict[str, JsonValue]] = []
-    declared_documents = public.metadata.get("document_files", [])
-    document_files = {
-        str(name)
-        for name in declared_documents
-        if isinstance(declared_documents, list) and isinstance(name, str)
-    }
-    for path in public.data_files:
-        key = _content_key(public, path)
-        content = public.data_contents[key]
-        display_path = Path(path)
-        public_name = (
-            Path(*display_path.parts[1:]).as_posix()
-            if display_path.parts and display_path.parts[0] == "inputs"
-            else display_path.as_posix()
-        )
-        if public_name in document_files:
-            files.append(
-                {
-                    "filename": path,
-                    "format": Path(path).suffix.lower().lstrip(".") or "text",
-                    "character_count": len(content),
-                    "content": content,
-                }
-            )
-            continue
-        if Path(path).suffix.lower() != ".csv":
-            files.append(
-                {
-                    "filename": path,
-                    "format": Path(path).suffix.lower().lstrip(".") or "text",
-                    "character_count": len(content),
-                    "preview": content[:500],
-                }
-            )
-            continue
-        reader = csv.DictReader(io.StringIO(content))
-        rows = list(reader)
-        columns = list(reader.fieldnames or [])
-        files.append(
-            {
-                "filename": path,
-                "format": "csv",
-                "row_count": len(rows),
-                "columns": [
-                    {
-                        "name": column,
-                        "inferred_type": _profile_scalar_type(
-                            [str(row.get(column, "")) for row in rows]
-                        ),
-                        "missing_count": sum(
-                            not str(row.get(column, "")).strip() for row in rows
-                        ),
-                    }
-                    for column in columns
-                ],
-                "preview": [
-                    {column: row.get(column, "") for column in columns}
-                    for row in rows[:3]
-                ],
-            }
-        )
-    return {"files": files}
+    """Compatibility wrapper around the shared public analysis context."""
+    staged_files = [Path(path).resolve() for path in public.data_files]
+    return build_public_analysis_context(public, staged_files)
 
 
-def _agent_input_context(public: PublicTaskView) -> str:
-    return json.dumps(_agent_input_profile(public), ensure_ascii=False, indent=2)
+def _agent_input_context(
+    public: PublicTaskView, staged_files: list[Path] | None = None
+) -> str:
+    context = (
+        build_public_analysis_context(public, staged_files)
+        if staged_files is not None
+        else _agent_input_profile(public)
+    )
+    return json.dumps(context, ensure_ascii=False, indent=2)
 
 
 def run_agent(
@@ -1006,13 +955,14 @@ def run_agent(
             _progress(progress, "workflow_started")
         workflow_started = time.perf_counter()
         staged_files = _resolved_public_files(public, run_directory)
+        analysis_context = build_public_analysis_context(public, staged_files)
         initial_state: AgentState = {
             "question": public.prompt,
             "file_paths": [Path(path).name for path in public.data_files],
             "staged_file_paths": [str(path) for path in staged_files],
             "staged_file_display_paths": list(public.data_files),
-            "input_context": _agent_input_context(public),
-            "input_profile": _agent_input_profile(public),
+            "input_context": json.dumps(analysis_context, ensure_ascii=False, indent=2),
+            "input_profile": analysis_context,
             "answer_schema": public.answer_schema,
             **reliability,
             "contract_escalated_goal_ids": [],

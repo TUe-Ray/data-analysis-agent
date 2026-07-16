@@ -27,6 +27,23 @@ When a revised goal needs a prior approved artifact, explicitly list its produce
 goal_id in depends_on; artifacts are not otherwise available. If a goal text
 mentions a prior goal_id, include that exact goal_id in depends_on. A goal receives
 JSON results from all declared dependencies and their upstream dependencies.
+When the public context contains a base specification, one or more amendments, and
+document-precedence metadata, begin with a compact specification-reconciliation
+goal. Its JSON-compatible result must state the effective amended rules, field and
+identifier mappings, and applied precedence, remain externally verifiable, and
+contain no calculated study outcomes. Every later goal that interprets scientific
+rules or mappings must depend transitively on that reconciliation goal so its
+verified GoalResult is the primary rule contract. Do not hard-code a particular
+goal_id for this pattern. Make the contract operationally sufficient: include
+exact physical coded values alongside semantic meanings, physical columns and join
+keys, canonical identifiers, scientific record-identity fields (distinguishing
+them from technical row keys), selection windows and tie-breaks, exclusion
+boundaries, and statistical definitions. Declare effective specification, field
+mappings, and document precedence as separate required outputs.
+Design attrition goals in the task's declared sequential order. A removal count is
+the number removed from the cohort remaining at that exact stage, so categories
+must be mutually exclusive. Never place a post-selection exclusion or its count in
+a goal that runs before the baseline/follow-up selection it depends on.
 When a public answer schema is supplied, set final_output_goal_id to the last goal.
 That final assembly goal's dependency closure must include every earlier goal and
 produce one complete answer object matching every required public-schema section;
@@ -78,11 +95,61 @@ custom objects in it. Write tabular intermediates as declared artifacts instead.
 To request downstream handoff, include an "artifacts" list in __agent_result__; each
 item must contain relative_name, description, and optional media_type, and must name
 an eligible file written inside the current goal directory. Such files are available
-only after the independent Verifier returns PASS.
+only after the independent Verifier returns PASS. If the goal requires a tabular or
+file artifact, merely writing the file is not enough: declare that file in the
+__agent_result__["artifacts"] list in the same execution. Never omit a required
+artifact declaration while returning only its scalar audit counts.
 Approved tabular artifacts list their factual columns. Use only columns that are
 listed; when an artifact lacks a field required for the goal, read an explicitly
 allowed staged input containing that field or an explicitly declared prerequisite
 artifact. Do not probe for fields by raising a KeyError.
+A verifier-approved artifact is the authoritative output of its producer goal. Do
+not reapply an upstream validity, eligibility, mapping, or deduplication filter in
+a downstream goal unless the current goal explicitly requires that audit; doing so
+with semantic labels where physical codes are stored can silently remove valid
+rows. When exact logical duplicate fields are supplied, exclude technical row keys
+from that identity and deduplicate on exactly the declared scientific fields.
+Never call drop_duplicates without the explicit scientific identity subset when
+the specification distinguishes logical duplicates from technical rows. Preserve
+the specification's declared stage order: when logical deduplication precedes
+validity filtering, reconstruct the joined rows, deduplicate on the complete
+scientific identity, and only then filter invalid rows. In that case, compute the
+duplicate count from joined rows minus deduplicated rows and the invalid count
+from deduplicated rows minus valid rows. Do not join an eligibility-filtered
+subject artifact before computing visit-level audit counts unless the specification
+explicitly limits those counts to eligible subjects.
+For a specification-reconciliation goal, the complete documents are already in
+the factual input context. Do not rely on whitespace-sensitive or line-wrap-
+sensitive regular expressions to recover governing rules from Markdown; derive the
+compact contract directly from the supplied evidence or parse headings and prose
+robustly across whitespace. The contract must distinguish semantic code meanings
+from the exact physical values stored in data. Record both, using the codebook to
+resolve every accepted physical code; downstream code must filter on physical
+values, not semantic labels. A codebook row explicitly marked not accepted must
+never appear in an accepted-values list. Its field mappings must cover coded eligibility
+fields, physical join relations, canonical and source identifiers, and the exact
+scientific logical-duplicate identity (excluding technical row keys). Its effective
+rules must also retain selection windows and tie-breaks, exclusion boundaries, and
+statistical definitions such as SD denominator, SE formula, and comparison
+direction. Do not return a smaller descriptive summary that downstream code would
+need to reinterpret from the source documents.
+For sequential attrition, compute each category from the cohort remaining after
+all earlier categories; never count all matching records globally or copy a
+preliminary overlapping count into the final result. Before returning, verify that
+the declared eligible cohort equals the sum of sequential removals plus the final
+complete cohort, and that arm counts sum to complete pairs.
+Preserve upstream attrition denominators from dependency GoalResults. In
+particular, never infer total input subjects from an eligibility-filtered artifact
+or subtract upstream exclusions a second time. Every attrition count must be a
+nonnegative integer.
+When a dependency GoalResult already supplies a named attrition count that the
+current goal must report, preserve that exact verified value. Do not recompute or
+replace it from raw inputs; report a conflict explicitly if the prerequisite
+artifact cannot support the required downstream calculation.
+Keep source-system identifiers and canonical analysis identifiers distinct. When
+an event table uses a source identifier, join it through the documented source
+identifier mapping before comparing it with canonical selected records; never
+join a source identifier directly to a canonical patient or analysis identifier.
 Never put summary text, JSON framing, Markdown fences, or explanation inside
 code_lines."""
 
@@ -99,7 +166,11 @@ object to __agent_result__ at module scope; do not manually serialize or print t
 result. Do not place DataFrames, Series, arrays, NumPy scalars, timestamps, Paths,
 sets, or custom objects in it. If the failure is PythonPolicyError, do not construct
 paths dynamically. Repair the typed deterministic diagnosis supplied by the user,
-not merely the script in general. Never put summary text, JSON framing, Markdown
+not merely the script in general. If a required list or table exceeds the result
+contract limit, never truncate, slice, sample, call head, or discard rows to fit
+the limit. Write the complete table as a declared artifact and return only its
+compact manifest, counts, and other required scalar facts. Never put summary text,
+JSON framing, Markdown
 fences, or explanation inside code_lines."""
 
 PYTHON_RESULT_SKELETON = """Minimal accepted pattern (replace paths and fields as
@@ -134,9 +205,28 @@ Apply this rubric:
 7. The result contributes to the original scientific objective and follows the
    supplied plan without requiring every procedural step to be narrated.
 8. Accept reasonable rounding, but reject material omissions or errors.
+   JSON numbers do not preserve insignificant trailing zeros: for example, 0.34
+   and 0.340 are the same JSON numeric value. Never request a scientific replan
+   solely to display trailing zeros when the value is already rounded to no more
+   than the required decimal places.
 9. A declared artifact is evidence only for its factual manifest. Do not PASS an
    artifact-dependent result if its listed columns cannot support the current goal
    or explicitly stated downstream data requirement.
+10. For specification reconciliation, validate amendment precedence, accepted
+    semantic values and their physical codes, analysis windows and targets,
+    exclusion boundaries, statistical definitions, identifier/join mappings, and
+    logical-record identity fields against the supplied documents. Reject a
+    reconciliation result that is not operationally sufficient for downstream
+    code or omits its declared effective-specification, mapping, or precedence
+    contract.
+11. When a verified dependency contains an effective specification, reject or
+    replan any downstream rule, mapping, or boundary inconsistent with that
+    contract and name the conflict precisely. Do not silently fall back to an
+    obsolete base-document rule.
+12. Attrition categories are sequential removals, not overlapping global event
+    counts. Check the conservation identity from the reported fields and reject
+    any result whose sequential removals plus final cohort do not equal the
+    eligible cohort.
 
 Return PASS only when no material issue remains. Return REPLAN when correction is
 needed. Feedback must be concise, specific, and actionable. Return only valid JSON
@@ -366,6 +456,7 @@ def build_python_generation_messages(
     input_context: str = "",
     approved_artifacts: list[dict[str, object]] | None = None,
     result_schema: dict[str, JsonValue] | None = None,
+    verification_feedback: str | None = None,
 ) -> list[dict[str, str]]:
     """Supply generated-code creation only the current factual execution context."""
     return [
@@ -378,7 +469,15 @@ def build_python_generation_messages(
                 "Use those exact absolute paths directly as string literals when "
                 "reading data.\n\n"
                 f"Staged input schema and factual context:\n{input_context}\n\n"
-                "If dependency_goal_results.json is listed, it is the only "
+                + (
+                    "Verifier correction from the preceding scientific replan; "
+                    "the regenerated implementation must address it without "
+                    "changing the approved goal:\n"
+                    f"{verification_feedback}\n\n"
+                    if verification_feedback
+                    else ""
+                )
+                + "If dependency_goal_results.json is listed, it is the only "
                 "runner-created file containing prerequisite results. Read "
                 "that exact path with json.load when prior result values are "
                 'needed. Its exact shape is {"goal_results":[{"goal_id":"...",'
@@ -495,21 +594,22 @@ def build_verifier_messages(
             f"Execution result:\n{execution_result}"
         )
     else:
-        body = "\n\n".join(
-            [
-                f"Original question:\n{question}",
-                f"Scientific objective:\n{scientific_objective or ''}",
-                f"Current IntermediateGoal:\n{json.dumps(current_goal)}",
-                f"Execution strategy summary:\n{json.dumps(strategy or {})}",
-                f"Factual execution result:\n{execution_result}",
-                f"Warnings:\n{json.dumps(warnings or [])}",
-                "Pending analysis artifact manifests (CSV headers and row counts are "
-                "factual). Return REPLAN when a declared artifact lacks fields needed "
-                "for the current goal or its stated downstream output:\n"
-                + json.dumps(pending_artifacts or []),
-                "Relevant prior GoalResults:\n" + json.dumps(prior_goal_results or []),
-            ]
-        )
+        sections = [
+            f"Original question:\n{question}",
+            f"Scientific objective:\n{scientific_objective or ''}",
+            f"Current IntermediateGoal:\n{json.dumps(current_goal)}",
+            f"Execution strategy summary:\n{json.dumps(strategy or {})}",
+            f"Factual execution result:\n{execution_result}",
+            f"Warnings:\n{json.dumps(warnings or [])}",
+            "Pending analysis artifact manifests (CSV headers and row counts are "
+            "factual). Return REPLAN when a declared artifact lacks fields needed "
+            "for the current goal or its stated downstream output:\n"
+            + json.dumps(pending_artifacts or []),
+            "Relevant prior GoalResults:\n" + json.dumps(prior_goal_results or []),
+        ]
+        if input_context:
+            sections.insert(2, f"Public input context and evidence:\n{input_context}")
+        body = "\n\n".join(sections)
     return [
         {"role": "system", "content": VERIFIER_SYSTEM_PROMPT},
         {"role": "user", "content": body},

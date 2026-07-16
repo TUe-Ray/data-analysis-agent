@@ -9,6 +9,7 @@ from data_analysis_agent.benchmark_approaches import (
 )
 from data_analysis_agent.benchmark_types import BenchmarkConfig, PublicTaskView
 from data_analysis_agent.models import ScriptedRoleModel
+from data_analysis_agent.prompts import PYTHON_REPAIR_SYSTEM_PROMPT
 from data_analysis_agent.python_runner import LocalPythonRunner
 
 
@@ -149,6 +150,12 @@ def test_final_checker_repair_regenerates_and_executes_python(tmp_path: Path) ->
     assert "never a patch, diff, or changed-line fragment" in repair_prompt
 
 
+def test_mechanical_repair_prompt_forbids_silent_result_truncation() -> None:
+    normalized = " ".join(PYTHON_REPAIR_SYSTEM_PROMPT.split())
+    assert "never truncate, slice, sample, call head, or discard rows" in normalized
+    assert "Write the complete table as a declared artifact" in normalized
+
+
 def test_invalid_checker_repair_fails_without_a_second_repair(tmp_path: Path) -> None:
     model = ScriptedRoleModel(
         {
@@ -232,11 +239,15 @@ def test_single_agent_uses_resolved_staged_file_path_from_its_execution_cwd(
         in model.calls[0].messages[0]["content"]
     )
     checker_prompt = model.calls[1].messages[1]["content"]
-    assert "BEGIN FILE: data.csv" in checker_prompt
-    assert "value\n1" in checker_prompt
+    assert '"row_count": 1' in checker_prompt
+    assert '"representative_rows": [{"value": "1"}]' in checker_prompt
+    assert "BEGIN FILE: data.csv" not in checker_prompt
+    assert "candidate-internal consistency evidence" in checker_prompt
     checker_system_prompt = model.calls[1].messages[0]["content"]
-    assert "matching\nexecution output alone is not evidence" in checker_system_prompt
-    assert "raw_row_count - deduplicated_row_count" in checker_system_prompt
+    assert "matching execution output alone is not evidence" in " ".join(
+        checker_system_prompt.split()
+    )
+    assert "document\nprecedence" in checker_system_prompt
     rejected = LocalPythonRunner().run(
         code=(
             "import pandas as pd\n"

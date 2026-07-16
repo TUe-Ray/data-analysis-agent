@@ -170,6 +170,10 @@ def generated_files() -> dict[str, str]:
             "difficulty": "distributed multi-step workflow",
             "source_task_id": "longitudinal_treatment_response",
             "document_files": PUBLIC_FILES[:4],
+            "document_precedence": [
+                "protocol/protocol_amendment_01.md overrides conflicting sections "
+                "of protocol/study_protocol.md"
+            ],
         },
     }
     return {

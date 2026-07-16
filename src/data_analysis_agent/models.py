@@ -207,6 +207,7 @@ class NebiusRoleModel:
         planner_max_output_tokens: int | None = None,
         executor_max_output_tokens: int | None = None,
         verifier_max_output_tokens: int | None = None,
+        final_checker_max_output_tokens: int | None = None,
         python_max_output_tokens: int | None = None,
     ) -> None:
         self._client = client
@@ -217,6 +218,7 @@ class NebiusRoleModel:
         self._planner_max_output_tokens = planner_max_output_tokens
         self._executor_max_output_tokens = executor_max_output_tokens
         self._verifier_max_output_tokens = verifier_max_output_tokens
+        self._final_checker_max_output_tokens = final_checker_max_output_tokens
         self._python_max_output_tokens = python_max_output_tokens
         self.last_token_usage: dict[str, int] | None = None
         self.last_api_request_count = 0
@@ -470,6 +472,13 @@ class NebiusRoleModel:
         if role == "verifier":
             return (
                 self._verifier_max_output_tokens
+                or self._max_output_tokens
+                or DEFAULT_ORDINARY_OUTPUT_TOKENS
+            )
+        if role == "final_checker":
+            return (
+                self._final_checker_max_output_tokens
+                or self._verifier_max_output_tokens
                 or self._max_output_tokens
                 or DEFAULT_ORDINARY_OUTPUT_TOKENS
             )

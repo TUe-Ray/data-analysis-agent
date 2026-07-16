@@ -347,6 +347,7 @@ def _live_model_factory(config: BenchmarkConfig) -> ModelFactory:
             planner_max_output_tokens=config.planner_max_output_tokens,
             executor_max_output_tokens=config.executor_max_output_tokens,
             verifier_max_output_tokens=config.verifier_max_output_tokens,
+            final_checker_max_output_tokens=(config.final_checker_max_output_tokens),
             python_max_output_tokens=config.python_max_output_tokens,
         )
 
@@ -847,6 +848,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verifier output limit (default: 8192).",
     )
     parser.add_argument(
+        "--final-checker-max-output-tokens",
+        type=int,
+        help=(
+            "Final completeness-checker output limit (default: configured "
+            "Verifier limit, otherwise at least 8192)."
+        ),
+    )
+    parser.add_argument(
         "--python-max-output-tokens",
         type=int,
         help="Structured Python generation and repair output limit (default: 32768).",
@@ -855,7 +864,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-replans",
         type=_non_negative_int,
-        default=1,
+        default=3,
         help="Maximum scientific replans allowed for each agent attempt.",
     )
     parser.add_argument(
@@ -887,6 +896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             planner_max_output_tokens=args.planner_max_output_tokens,
             executor_max_output_tokens=args.executor_max_output_tokens,
             verifier_max_output_tokens=args.verifier_max_output_tokens,
+            final_checker_max_output_tokens=(args.final_checker_max_output_tokens),
             python_max_output_tokens=args.python_max_output_tokens,
             timeout_seconds=args.timeout,
             max_replans=args.max_replans,

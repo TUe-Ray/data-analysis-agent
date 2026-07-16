@@ -243,6 +243,9 @@
       "protocol/protocol_amendment_01.md",
       "documentation/data_dictionary.csv",
       "documentation/value_codebook.csv"
+    ],
+    "document_precedence": [
+      "protocol/protocol_amendment_01.md overrides conflicting sections of protocol/study_protocol.md"
     ]
   }
 }

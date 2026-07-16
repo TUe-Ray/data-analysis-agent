@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from data_analysis_agent.benchmark import (
     DEFAULT_TASKS_ROOT,
+    _live_model_factory,
     _offline_model_factory,
     benchmark_scope_label,
     build_benchmark_run_id,
@@ -59,6 +60,8 @@ def test_benchmark_parser_accepts_max_replans() -> None:
             "5",
             "--planner-max-output-tokens",
             "9000",
+            "--final-checker-max-output-tokens",
+            "12000",
             "--python-max-output-tokens",
             "36000",
         ]
@@ -66,7 +69,16 @@ def test_benchmark_parser_accepts_max_replans() -> None:
 
     assert args.max_replans == 5
     assert args.planner_max_output_tokens == 9000
+    assert args.final_checker_max_output_tokens == 12000
     assert args.python_max_output_tokens == 36000
+
+
+def test_benchmark_parser_uses_three_bounded_scientific_replans_by_default() -> None:
+    args = build_parser().parse_args(
+        ["--task", "successive_difference_smoke", "--approaches", "agent"]
+    )
+
+    assert args.max_replans == 3
 
 
 def test_agent_uses_configured_max_replans(task, tmp_path: Path) -> None:
@@ -98,6 +110,45 @@ def test_agent_uses_configured_max_replans(task, tmp_path: Path) -> None:
     initial_state = build_graph.return_value.invoke.call_args.args[0]
     assert outcome.status == "completed"
     assert initial_state["max_replans"] == 5
+
+
+def test_final_checker_token_limit_propagates_to_live_model_and_config_file(
+    tmp_path: Path,
+) -> None:
+    config = BenchmarkConfig(
+        model="live-model",
+        task_ids=["successive_difference_smoke"],
+        approaches=["direct_answer"],
+        verifier_max_output_tokens=12000,
+        final_checker_max_output_tokens=16000,
+    )
+    with (
+        patch("data_analysis_agent.benchmark.load_settings", return_value=Mock()),
+        patch(
+            "data_analysis_agent.benchmark.create_nebius_client", return_value=Mock()
+        ),
+    ):
+        role_model = _live_model_factory(config)(
+            "single_agent_checker",
+            PublicTaskView(
+                task_id="fixture",
+                prompt="fixture",
+                data_files=[],
+                data_contents={},
+                answer_schema={"type": "object"},
+            ),
+        )
+    assert role_model._final_checker_max_output_tokens == 16000
+
+    summary, _ = run_benchmark(
+        config=config.model_copy(update={"model": "offline", "live": False}),
+        output_root=tmp_path / "runs",
+        project_root=tmp_path,
+    )
+    persisted = json.loads(
+        (Path(summary.results_path).parent / "config.json").read_text(encoding="utf-8")
+    )
+    assert persisted["final_checker_max_output_tokens"] == 16000
 
 
 def _final(value: float) -> str:

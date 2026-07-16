@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 Approach = Literal[
     "direct_answer",
@@ -82,6 +82,7 @@ class BenchmarkConfig(BaseModel):
     planner_max_output_tokens: int | None = Field(default=None, gt=0)
     executor_max_output_tokens: int | None = Field(default=None, gt=0)
     verifier_max_output_tokens: int | None = Field(default=None, gt=0)
+    final_checker_max_output_tokens: int | None = Field(default=None, gt=0)
     python_max_output_tokens: int | None = Field(default=None, gt=0)
     timeout_seconds: float = Field(default=30.0, gt=0)
     direct_answer_max_input_chars: int = Field(default=500_000, gt=0)
@@ -93,6 +94,16 @@ class BenchmarkConfig(BaseModel):
     live: bool = False
     live_progress: bool = True
     stop_after_goals: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def materialize_final_checker_output_limit(self) -> BenchmarkConfig:
+        """Persist an auditable checker budget no lower than Verifier defaults."""
+        if self.final_checker_max_output_tokens is None:
+            self.final_checker_max_output_tokens = (
+                self.verifier_max_output_tokens
+                or max(self.max_output_tokens or 0, 8192)
+            )
+        return self
 
 
 class ApproachOutcome(BaseModel):

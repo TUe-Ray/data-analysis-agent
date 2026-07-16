@@ -161,6 +161,8 @@ def _available_contract_fields(state: AgentState) -> set[str]:
     fields: set[str] = set()
     profile = state.get("input_profile", {})
     files = profile.get("files", []) if isinstance(profile, dict) else []
+    if isinstance(profile, dict) and not files:
+        files = profile.get("csv_profiles", [])
     if isinstance(files, list):
         for file_profile in files:
             if not isinstance(file_profile, dict):
@@ -373,6 +375,56 @@ def _validate_plan(
                 + ", ".join(missing_paths)
             )
     return plan, True
+
+
+def _validate_document_reconciliation_plan(
+    state: AgentState, plan: HighLevelPlan
+) -> None:
+    """Require an explicit dependency root when public documents can conflict."""
+    profile = state.get("input_profile")
+    if not isinstance(profile, dict):
+        return
+    task = profile.get("task")
+    documents = profile.get("specification_documents")
+    if not isinstance(task, dict) or not isinstance(documents, list):
+        return
+    precedence = task.get("document_precedence")
+    if not precedence or len(documents) < 2:
+        return
+    first = plan.goals[0]
+    missing = [
+        label
+        for label, alternatives in (
+            ("effective specification", ("effective", "governing rule")),
+            ("field mappings", ("mapping", "physical field")),
+            ("document precedence", ("precedence", "governing document")),
+        )
+        if not any(
+            any(term in output.casefold() for term in alternatives)
+            for output in first.required_outputs
+        )
+    ]
+    if missing or len(first.required_outputs) < 3:
+        raise PlannerOutputError(
+            "Tasks with conflicting specification documents must begin with a "
+            "reconciliation goal whose required_outputs separately declare: "
+            + ", ".join(missing or ["effective specification, mappings, precedence"])
+        )
+    goals_by_id = {goal.goal_id: goal for goal in plan.goals}
+    for goal in plan.goals[1:]:
+        closure: set[str] = set()
+        pending = list(goal.depends_on)
+        while pending:
+            dependency = pending.pop()
+            if dependency in closure:
+                continue
+            closure.add(dependency)
+            pending.extend(goals_by_id[dependency].depends_on)
+        if first.goal_id not in closure:
+            raise PlannerOutputError(
+                f"Goal {goal.goal_id!r} must transitively depend on the initial "
+                "specification-reconciliation goal"
+            )
 
 
 def _goal_fingerprint(goal: IntermediateGoal | dict[str, object]) -> str:
@@ -638,6 +690,8 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
             answer_schema=state.get("answer_schema"),
             max_plan_goals=state.get("max_plan_goals", 100),
         )
+        if structured:
+            _validate_document_reconciliation_plan(state, plan)
         if state.get("planner_mode") == "scientific_replan" and structured:
             _validate_replan_continuity(state, plan)
         elif plan.invalidate_from_goal_id is not None:
@@ -926,6 +980,22 @@ def _dependency_goal_results(state: AgentState) -> list[dict[str, object]]:
         for item in state.get("completed_goal_results", [])
         if str(item.get("goal_id")) in required
     ]
+
+
+def _goal_input_context(state: AgentState) -> str:
+    """Use full documents until a verified dependency contract is available."""
+    profile = state.get("input_profile")
+    if not isinstance(profile, dict):
+        return ""
+    if not _dependency_goal_results(state):
+        return state.get("input_context", "")
+    compact = dict(profile)
+    compact["specification_documents"] = []
+    compact["specification_evidence_note"] = (
+        "Complete documents were supplied to the Planner and reconciliation goal; "
+        "use Relevant prior GoalResults as the verified effective rule contract."
+    )
+    return json.dumps(compact, ensure_ascii=False, indent=2)
 
 
 def _dependency_result_context_path(state: AgentState) -> Path | None:
@@ -1504,7 +1574,7 @@ def make_executor_node(
         catalog = registry.catalog()
         messages = build_executor_messages(
             question=state["question"],
-            input_context=state["input_context"],
+            input_context=_goal_input_context(state),
             current_goal=state["current_goal"],
             completed_goal_results=_dependency_goal_results(state),
             verification_feedback=(
@@ -1594,11 +1664,16 @@ def make_executor_node(
                 staged_file_paths=[str(path) for path in _allowed_paths(state)],
                 completed_goal_results=_dependency_goal_results(state),
                 goal_directory=str(goal_directory),
-                input_context=state["input_context"],
+                input_context=_goal_input_context(state),
                 approved_artifacts=_approved_artifact_context(state),
                 result_schema=(
                     state.get("answer_schema")
                     if goal.goal_id == state.get("final_output_goal_id")
+                    else None
+                ),
+                verification_feedback=(
+                    state.get("verification_feedback")
+                    if state.get("verification_decision") == "REPLAN"
                     else None
                 ),
             )
@@ -1705,7 +1780,7 @@ def make_mechanical_repair_node(
             failure_fingerprint=state.get("consecutive_failure_fingerprint"),
             staged_file_paths=[str(path) for path in _allowed_paths(state)],
             goal_directory=str(Path(state["run_directory"]) / "goals" / goal.goal_id),
-            input_context=state["input_context"],
+            input_context=_goal_input_context(state),
             completed_goal_results=_dependency_goal_results(state),
             repair_history=history,
             approved_artifacts=_approved_artifact_context(state),
@@ -1730,6 +1805,14 @@ def make_mechanical_repair_node(
             "trace": _trace(state, f"mechanical_repair:attempt_{attempt}"),
         }
         strategy = ExecutionStrategy.model_validate(state["current_strategy"])
+        truncation_error = (
+            _result_limit_truncation_error(previous, contract.source())
+            if isinstance(contract, PythonRepair)
+            else None
+        )
+        if truncation_error:
+            contract = None
+            contract_error = truncation_error
         if contract is None:
             updates = _generation_contract_failure_update(
                 state=repair_state,
@@ -1762,6 +1845,298 @@ def make_mechanical_repair_node(
     return mechanical_repair
 
 
+def _result_limit_truncation_error(
+    previous: PythonExecutionResult, source: str
+) -> str | None:
+    """Reject silent sampling as a repair for an oversized required result."""
+    if (
+        previous.failure_category != "result_contract_error"
+        or "result list length" not in (previous.error or "")
+    ):
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Slice)
+            and node.slice.lower is None
+            and isinstance(node.slice.upper, ast.Constant)
+            and isinstance(node.slice.upper.value, int)
+        ):
+            return (
+                "oversized-result repair may not truncate a required list with "
+                "an upper-bound slice; write the complete table as a declared "
+                "artifact"
+            )
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"head", "sample"}
+        ):
+            return (
+                "oversized-result repair may not sample a required table with "
+                f"{node.func.attr}(); write the complete table as a declared artifact"
+            )
+    return None
+
+
+def _attrition_consistency_error(result: dict[str, object]) -> str | None:
+    """Reject overlapping counts when a complete sequential attrition is present."""
+    raw = result.get("attrition")
+    if not isinstance(raw, dict):
+        raw = result.get("attrition_counts")
+    if not isinstance(raw, dict):
+        return None
+    keys = (
+        "total_patients",
+        "basic_ineligible",
+        "eligible_after_basic_checks",
+        "excluded_pre_start",
+        "no_valid_baseline",
+        "no_valid_followup",
+        "excluded_post_start_before_or_on_followup",
+        "complete_pairs",
+        "complete_pairs_arm_a",
+        "complete_pairs_arm_b",
+    )
+    if not all(isinstance(raw.get(key), int) for key in keys):
+        return None
+    values = {key: int(raw[key]) for key in keys}
+    negative = [key for key, value in values.items() if value < 0]
+    if negative:
+        return (
+            "Sequential attrition is inconsistent: counts must be nonnegative; "
+            "invalid fields: " + ", ".join(negative)
+        )
+    eligible = values["total_patients"] - values["basic_ineligible"]
+    sequential_total = sum(
+        values[key]
+        for key in (
+            "excluded_pre_start",
+            "no_valid_baseline",
+            "no_valid_followup",
+            "excluded_post_start_before_or_on_followup",
+            "complete_pairs",
+        )
+    )
+    if values["eligible_after_basic_checks"] != eligible:
+        return (
+            "Sequential attrition is inconsistent: eligible_after_basic_checks "
+            "must equal total_patients - basic_ineligible. Recompute each removal "
+            "from the cohort remaining at that stage."
+        )
+    if sequential_total != eligible:
+        return (
+            "Sequential attrition is inconsistent: excluded_pre_start + "
+            "no_valid_baseline + no_valid_followup + "
+            "excluded_post_start_before_or_on_followup + complete_pairs must "
+            f"equal eligible_after_basic_checks ({eligible}), but equals "
+            f"{sequential_total}. Recompute mutually exclusive stage removals "
+            "instead of copying overlapping global event counts."
+        )
+    if (
+        values["complete_pairs_arm_a"] + values["complete_pairs_arm_b"]
+        != values["complete_pairs"]
+    ):
+        return (
+            "Sequential attrition is inconsistent: complete-pair arm counts must "
+            "sum to complete_pairs."
+        )
+    pairs = result.get("selected_pairs")
+    if isinstance(pairs, list) and len(pairs) != values["complete_pairs"]:
+        return (
+            "Sequential attrition is inconsistent: selected_pairs length must "
+            "equal complete_pairs."
+        )
+    return None
+
+
+def _upstream_attrition_conflict_error(
+    state: AgentState, result: dict[str, object]
+) -> str | None:
+    """Reject a downstream result that overwrites verified attrition counts."""
+    current = result.get("attrition")
+    if not isinstance(current, dict):
+        current = result.get("attrition_counts")
+    if not isinstance(current, dict):
+        return None
+
+    for dependency in _dependency_goal_results(state):
+        dependency_result = dependency.get("result")
+        if not isinstance(dependency_result, dict):
+            continue
+        upstream = dependency_result.get("attrition")
+        if not isinstance(upstream, dict):
+            upstream = dependency_result.get("attrition_counts")
+        if not isinstance(upstream, dict):
+            continue
+        goal_id = dependency.get("goal_id", "an upstream goal")
+        for key, upstream_value in upstream.items():
+            current_value = current.get(key)
+            if (
+                type(upstream_value) is int
+                and type(current_value) is int
+                and current_value != upstream_value
+            ):
+                return (
+                    "Attrition conflicts with verified upstream goal "
+                    f"{goal_id}: {key} is {current_value}, but the approved "
+                    f"value is {upstream_value}. Preserve verified attrition "
+                    "counts instead of recomputing them from raw inputs."
+                )
+    return None
+
+
+def _is_json_trailing_zero_only_replan(output: VerificationOutput) -> bool:
+    """Recognize a verifier request that is impossible in JSON number semantics."""
+    if output.decision != "REPLAN":
+        return False
+    feedback = output.feedback.lower()
+    padding_markers = (
+        "decimal place",
+        "decimal precision",
+        "trailing zero",
+    )
+    representation_markers = (
+        "exactly three",
+        "three-decimal",
+        "three decimal",
+        "two decimals",
+        "two decimal",
+    )
+    material_error_markers = (
+        "incorrect value",
+        "wrong value",
+        "inconsistent",
+        "missing output",
+        "missing field",
+        "schema violation",
+        "wrong formula",
+        "wrong direction",
+        "does not match",
+        "doesn't match",
+    )
+    return (
+        any(marker in feedback for marker in padding_markers)
+        and any(marker in feedback for marker in representation_markers)
+        and not any(marker in feedback for marker in material_error_markers)
+    )
+
+
+def _reconciliation_contract_error(
+    state: AgentState,
+    result: dict[str, object],
+) -> str | None:
+    """Check that a declared reconciliation result is operational, not descriptive."""
+    raw_goal = state.get("current_goal")
+    if not isinstance(raw_goal, dict):
+        return None
+    outputs = " ".join(
+        str(item).casefold() for item in raw_goal.get("required_outputs", [])
+    )
+    if not all(term in outputs for term in ("effective", "mapping", "precedence")):
+        return None
+    effective = result.get("effective_specification")
+    mappings = result.get("field_mappings")
+    precedence = result.get("document_precedence")
+    missing_sections = [
+        name
+        for name, value in (
+            ("effective_specification", effective),
+            ("field_mappings", mappings),
+            ("document_precedence", precedence),
+        )
+        if not value
+    ]
+    if missing_sections:
+        return "Reconciliation contract is missing: " + ", ".join(missing_sections)
+
+    profile = state.get("input_profile")
+    if not isinstance(profile, dict):
+        return None
+    documents = profile.get("specification_documents", [])
+    if not isinstance(documents, list):
+        return None
+    accepted_physical_values: set[str] = set()
+    rejected_physical_values: set[str] = set()
+    required_mapping_columns: set[str] = set()
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        content = document.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            rows = list(csv.DictReader(content.splitlines()))
+        except csv.Error:
+            continue
+        for row in rows:
+            physical = str(row.get("physical_value") or "").strip()
+            use = str(row.get("analysis_use") or "").casefold()
+            if physical and "accepted" in use and "not accepted" not in use:
+                accepted_physical_values.add(physical)
+            if physical and "not accepted" in use:
+                rejected_physical_values.add(physical)
+            column = str(row.get("physical_column") or "").strip()
+            relation = str(row.get("join_key_or_relation") or "").casefold()
+            meaning = str(row.get("semantic_meaning") or "").casefold()
+            if column and ("join" in relation or "canonical identifier" in meaning):
+                required_mapping_columns.add(column)
+
+    result_text = json.dumps(result, sort_keys=True).casefold()
+    missing_codes = sorted(
+        value
+        for value in accepted_physical_values
+        if value.casefold() not in result_text
+    )
+    missing_columns = sorted(
+        value
+        for value in required_mapping_columns
+        if value.casefold() not in result_text
+    )
+
+    accepted_contract_values: set[str] = set()
+
+    def collect_accepted_values(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if "accepted" in str(key).casefold():
+                    if isinstance(child, list):
+                        accepted_contract_values.update(
+                            str(item) for item in child if isinstance(item, str)
+                        )
+                    elif isinstance(child, str):
+                        accepted_contract_values.add(child)
+                collect_accepted_values(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_accepted_values(child)
+
+    collect_accepted_values(result)
+    unexpected_codes = sorted(rejected_physical_values & accepted_contract_values)
+    issues: list[str] = []
+    if missing_codes:
+        issues.append("accepted physical codebook values " + ", ".join(missing_codes))
+    if missing_columns:
+        issues.append("physical join/canonical mappings " + ", ".join(missing_columns))
+    if unexpected_codes:
+        issues.append(
+            "removal of explicitly non-accepted codes from accepted lists: "
+            + ", ".join(unexpected_codes)
+        )
+    if issues:
+        return (
+            "Reconciliation contract is not operationally sufficient; add "
+            + "; add ".join(issues)
+            + ". Keep semantic meanings as well, but downstream filtering must use "
+            "the physical stored values."
+        )
+    return None
+
+
 def make_verifier_node(model: RoleModel) -> Node:
     """Create a goal-scoped Verifier with one structured-output repair."""
 
@@ -1772,6 +2147,7 @@ def make_verifier_node(model: RoleModel) -> Node:
             current_result = GoalResult.model_validate(state["current_goal_result"])
             messages = build_verifier_messages(
                 question=state["question"],
+                input_context=_goal_input_context(state),
                 execution_result=state["execution_result"],
                 scientific_objective=plan.scientific_objective,
                 current_goal=state["current_goal"],
@@ -1792,6 +2168,38 @@ def make_verifier_node(model: RoleModel) -> Node:
             raw_output = model.generate(role="verifier", messages=messages)
             try:
                 output = VerificationOutput.model_validate_json(raw_output)
+                if _is_json_trailing_zero_only_replan(output):
+                    output = VerificationOutput(
+                        decision="PASS",
+                        feedback=(
+                            "Accepted: JSON numeric values do not preserve "
+                            "insignificant trailing-zero display padding."
+                        ),
+                    )
+                if structured:
+                    current = GoalResult.model_validate(state["current_goal_result"])
+                    contract_error = _reconciliation_contract_error(
+                        state, current.result
+                    )
+                    attrition_error = _attrition_consistency_error(current.result)
+                    upstream_attrition_error = _upstream_attrition_conflict_error(
+                        state, current.result
+                    )
+                    if contract_error:
+                        output = VerificationOutput(
+                            decision="REPLAN",
+                            feedback=contract_error,
+                        )
+                    if attrition_error:
+                        output = VerificationOutput(
+                            decision="REPLAN",
+                            feedback=attrition_error,
+                        )
+                    if upstream_attrition_error:
+                        output = VerificationOutput(
+                            decision="REPLAN",
+                            feedback=upstream_attrition_error,
+                        )
                 if (
                     structured
                     and not GoalResult.model_validate(

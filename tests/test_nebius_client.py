@@ -7,6 +7,7 @@ import pytest
 from openai import APIConnectionError, BadRequestError
 
 from data_analysis_agent import nebius_client
+from data_analysis_agent.benchmark_types import BenchmarkConfig
 from data_analysis_agent.config import Settings
 from data_analysis_agent.models import (
     EmptyModelResponseError,
@@ -156,6 +157,8 @@ def test_nebius_uses_purpose_specific_output_limits() -> None:
     assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
     model.generate(role="verifier", messages=[])
     assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
+    model.generate(role="final_checker", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 8192
     model.generate(role="direct_answer", messages=[])
     assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 4096
     model.generate_structured(
@@ -165,6 +168,42 @@ def test_nebius_uses_purpose_specific_output_limits() -> None:
         schema=PythonGeneration.model_json_schema(),
     )
     assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 32768
+
+
+def test_final_checker_has_independent_limit_and_inherits_verifier_limit() -> None:
+    client = Mock()
+    client.chat.completions.create.return_value = _response('{"ok":true}')
+    inherited = NebiusRoleModel(
+        client=client,
+        model="test-model",
+        max_output_tokens=4096,
+        verifier_max_output_tokens=12000,
+    )
+
+    inherited.generate(role="final_checker", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 12000
+
+    explicit = NebiusRoleModel(
+        client=client,
+        model="test-model",
+        verifier_max_output_tokens=12000,
+        final_checker_max_output_tokens=16000,
+    )
+    explicit.generate(role="final_checker", messages=[])
+    assert client.chat.completions.create.call_args.kwargs["max_tokens"] == 16000
+
+
+def test_benchmark_config_materializes_final_checker_default() -> None:
+    default = BenchmarkConfig(model="test", task_ids=["fixture"], approaches=["agent"])
+    high_verifier = BenchmarkConfig(
+        model="test",
+        task_ids=["fixture"],
+        approaches=["agent"],
+        verifier_max_output_tokens=12000,
+    )
+
+    assert default.final_checker_max_output_tokens == 8192
+    assert high_verifier.final_checker_max_output_tokens == 12000
 
 
 def test_legacy_general_limit_does_not_lower_python_limit() -> None:
@@ -240,9 +279,7 @@ def test_nebius_retries_tool_call_only_response_with_correction() -> None:
     assert output == '{"strategy":"generated_python"}'
     assert model.last_response_retry_count == 1
     assert client.chat.completions.create.call_count == 2
-    retry_messages = client.chat.completions.create.call_args_list[1].kwargs[
-        "messages"
-    ]
+    retry_messages = client.chat.completions.create.call_args_list[1].kwargs["messages"]
     assert retry_messages[-1]["role"] == "user"
     assert "No tools are available" in retry_messages[-1]["content"]
     assert model.last_provider_attempts[0]["tool_calls"] is True
