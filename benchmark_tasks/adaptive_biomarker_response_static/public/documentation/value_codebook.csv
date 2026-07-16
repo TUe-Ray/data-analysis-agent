@@ -1,0 +1,4 @@
+field,physical_value,semantic_label
+qc_code,Q_OK,valid
+qc_code,Q_REVIEWED,reviewed
+qc_code,Q_FAIL,rejected

@@ -130,4 +130,22 @@ def build_public_analysis_context(
         "specification_documents": specification_documents,
         "csv_profiles": csv_profiles,
         "other_public_files": other_files,
+        "deferred_public_files": [
+            {
+                "public_relative_filename": name,
+                "release_stage": next(
+                    (
+                        str(stage.get("name", ""))
+                        for stage in public.release_stages
+                        if name in stage.get("files", [])
+                    ),
+                    "",
+                ),
+            }
+            for name in public.deferred_public_files
+        ],
+        "release_manifest": [
+            {key: value for key, value in stage.items() if key != "private_reference"}
+            for stage in public.release_stages
+        ],
     }

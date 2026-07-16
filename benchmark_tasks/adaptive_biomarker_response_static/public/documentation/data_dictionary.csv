@@ -1,0 +1,3 @@
+table,column,meaning
+specimen_manifest,qc_code,physical code
+assay_measurements,record_id,scientific identity

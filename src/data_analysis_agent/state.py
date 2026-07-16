@@ -11,7 +11,7 @@ class IterationRecord(TypedDict, total=False):
     iteration: int
     plan: str
     execution_result: str
-    verification_decision: Literal["PASS", "REPLAN"]
+    verification_decision: Literal["PASS", "RETRY_GOAL", "REPLAN"]
     verification_feedback: str
     route: str
     goal_id: str
@@ -97,6 +97,13 @@ class AgentState(TypedDict, total=False):
     capability_catalog: list[dict[str, JsonValue]]
     staged_file_paths: list[str]
     staged_file_display_paths: list[str]
+    public_data_contents: dict[str, str]
+    public_metadata: dict[str, JsonValue]
+    public_task_id: str
+    public_prompt_variant: str
+    deferred_public_files: dict[str, str]
+    release_stages: list[dict[str, JsonValue]]
+    release_history: list[dict[str, JsonValue]]
     execution_working_directory: str
     executor_warnings: list[str]
     policy_failure_reason: str | None
@@ -111,6 +118,7 @@ class AgentState(TypedDict, total=False):
     max_code_repair_no_progress_attempts: int
     max_failure_family_attempts: int
     code_repair_no_progress: bool
+    fresh_regeneration_used_for_current_goal: bool
     consecutive_failure_family: str | None
     consecutive_failure_fingerprint: str | None
     consecutive_failure_family_count: int
@@ -132,8 +140,13 @@ class AgentState(TypedDict, total=False):
         | None
     )
     execution_result: str
-    verification_decision: Literal["PASS", "REPLAN"]
+    verification_decision: Literal["PASS", "RETRY_GOAL", "REPLAN"]
     verification_feedback: str
+    verification_issue_classification: str
+    verifier_output_failed: bool
+    goal_retry_count: int
+    max_goal_retries: int
+    goal_retry_history: list[dict[str, JsonValue]]
     replan_count: int
     max_replans: int
     stop_after_goals: int | None

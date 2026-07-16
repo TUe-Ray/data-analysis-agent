@@ -1,0 +1,5 @@
+analysis_subject_id,specimen_id,plate_id,qc_code,qc_value
+A01,S01,P1,Q_OK,0.85
+A02,S02,P1,Q_REVIEWED,0.90
+B01,S03,P2,Q_OK,0.86
+B02,S04,P2,Q_FAIL,0.99

@@ -63,6 +63,40 @@ def _load_public_files(
         ) from error
 
 
+def _declared_deferred_files(
+    public_root: Path, task_config: dict[str, object]
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    """Load gated public inputs privately to the orchestrator, not the prompt."""
+    declared = task_config.get("deferred_public_files", [])
+    stages = task_config.get("release_stages", [])
+    if not declared and not stages:
+        return {}, []
+    if not isinstance(declared, list) or any(
+        not isinstance(item, str) for item in declared
+    ):
+        raise BenchmarkTaskError("deferred_public_files must be a list of paths")
+    if not isinstance(stages, list) or any(
+        not isinstance(item, dict) for item in stages
+    ):
+        raise BenchmarkTaskError("release_stages must be a list of objects")
+    root = public_root.resolve()
+    contents: dict[str, str] = {}
+    for name in declared:
+        relative = Path(name)
+        path = (public_root / relative).resolve()
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or root not in path.parents
+            or not path.is_file()
+        ):
+            raise BenchmarkTaskError(
+                f"Unsafe or missing deferred public file: {name!r}"
+            )
+        contents[name] = path.read_text(encoding="utf-8")
+    return contents, [dict(stage) for stage in stages]
+
+
 def _load_prompt_variants(
     public_root: Path, task_config: dict[str, object], requested_variant: str | None
 ) -> tuple[str, str]:
@@ -129,7 +163,16 @@ def load_benchmark_task(
             f"Could not load public task {task_id}: {error}"
         ) from error
     variant, prompt = _load_prompt_variants(public_root, task_config, prompt_variant)
-    data_files, data_contents = _load_public_files(public_root, task_config, task_id)
+    # Gated tasks name their initially readable subset explicitly.  Legacy and
+    # static tasks continue to use public_files unchanged.
+    initial = task_config.get("initial_public_files")
+    loading_config = dict(task_config)
+    if initial is not None:
+        loading_config["public_files"] = initial
+    data_files, data_contents = _load_public_files(public_root, loading_config, task_id)
+    deferred_files, release_stages = _declared_deferred_files(public_root, task_config)
+    if set(data_files) & set(deferred_files):
+        raise BenchmarkTaskError("initial and deferred public files overlap")
 
     grader = private_root / "grader.py"
     reference = private_root / "reference.json"
@@ -143,6 +186,8 @@ def load_benchmark_task(
         data_contents=data_contents,
         answer_schema=task_config["answer_schema"],
         metadata=task_config.get("metadata", {}),
+        deferred_public_files=deferred_files,
+        release_stages=release_stages,
     )
     return LoadedBenchmarkTask(
         public=public,

@@ -14,6 +14,8 @@ from data_analysis_agent.final_output import (
 from data_analysis_agent.models import RoleModel
 from data_analysis_agent.nodes import (
     contract_escalation_node,
+    fresh_regeneration_node,
+    goal_retry_node,
     make_executor_node,
     make_final_answer_generator_node,
     make_mechanical_repair_node,
@@ -29,6 +31,7 @@ from data_analysis_agent.nodes import (
     planner_output_failure_node,
     planner_validator_node,
     select_current_goal_node,
+    verifier_output_failure_node,
 )
 from data_analysis_agent.python_runner import LocalPythonRunner
 from data_analysis_agent.schemas import HighLevelPlan
@@ -45,9 +48,13 @@ def route_after_verification(
     "final_answer_generator",
     "failure_finalizer",
     "partial_run_finalizer",
+    "goal_retry",
+    "verifier_failure",
 ]:
     """Route validated decisions while enforcing the configured replan bound."""
     decision = state.get("verification_decision")
+    if state.get("verifier_output_failed"):
+        return "verifier_failure"
     if decision == "PASS":
         target = state.get("stop_after_goals")
         if target and len(state.get("completed_goal_results", [])) >= target:
@@ -61,13 +68,21 @@ def route_after_verification(
         if state.get("replan_count", 0) < state.get("max_replans", 1):
             return "planner"
         return "failure_finalizer"
+    if decision == "RETRY_GOAL":
+        if state.get("goal_retry_count", 0) < state.get("max_goal_retries", 2):
+            return "goal_retry"
+        return "failure_finalizer"
     raise RuntimeError("Verifier did not provide a routing decision")
 
 
 def route_after_execution(
     state: AgentState,
 ) -> Literal[
-    "verifier", "mechanical_repair", "contract_escalation", "mechanical_failure"
+    "verifier",
+    "mechanical_repair",
+    "contract_escalation",
+    "fresh_regeneration",
+    "mechanical_failure",
 ]:
     """Only successful generated executions may reach scientific verification."""
     result = state.get("current_goal_result")
@@ -86,6 +101,8 @@ def route_after_execution(
         "max_code_repair_attempts", 8
     ):
         return "mechanical_repair"
+    if not state.get("fresh_regeneration_used_for_current_goal", False):
+        return "fresh_regeneration"
     return "mechanical_failure"
 
 
@@ -140,8 +157,10 @@ def build_graph(
     workflow.add_node("select_current_goal", select_current_goal_node)
     workflow.add_node("executor", make_executor_node(model, runner))
     workflow.add_node("mechanical_repair", make_mechanical_repair_node(model, runner))
+    workflow.add_node("fresh_regeneration", fresh_regeneration_node)
     workflow.add_node("contract_escalation", contract_escalation_node)
     workflow.add_node("verifier", make_verifier_node(model))
+    workflow.add_node("goal_retry", goal_retry_node)
     workflow.add_node(
         "final_answer_generator",
         make_final_answer_generator_node(output_provider),
@@ -151,6 +170,7 @@ def build_graph(
     workflow.add_node("failure_finalizer", max_replan_failure_node)
     workflow.add_node("planner_output_failure", planner_output_failure_node)
     workflow.add_node("mechanical_failure", mechanical_execution_failure_node)
+    workflow.add_node("verifier_failure", verifier_output_failure_node)
     workflow.add_node("output_failure", output_failure_node)
     workflow.add_node("partial_run_finalizer", partial_run_finalizer_node)
 
@@ -179,6 +199,7 @@ def build_graph(
             "mechanical_repair": "mechanical_repair",
             "contract_escalation": "contract_escalation",
             "mechanical_failure": "mechanical_failure",
+            "fresh_regeneration": "fresh_regeneration",
         },
     )
     workflow.add_conditional_edges(
@@ -189,8 +210,10 @@ def build_graph(
             "mechanical_repair": "mechanical_repair",
             "contract_escalation": "contract_escalation",
             "mechanical_failure": "mechanical_failure",
+            "fresh_regeneration": "fresh_regeneration",
         },
     )
+    workflow.add_edge("fresh_regeneration", "executor")
     workflow.add_edge("contract_escalation", "planner")
     workflow.add_conditional_edges(
         "verifier",
@@ -201,8 +224,11 @@ def build_graph(
             "final_answer_generator": "final_answer_generator",
             "failure_finalizer": "failure_finalizer",
             "partial_run_finalizer": "partial_run_finalizer",
+            "goal_retry": "goal_retry",
+            "verifier_failure": "verifier_failure",
         },
     )
+    workflow.add_edge("goal_retry", "executor")
     workflow.add_edge("final_answer_generator", "output_validator")
     workflow.add_conditional_edges(
         "output_validator",
@@ -217,6 +243,7 @@ def build_graph(
     workflow.add_edge("failure_finalizer", END)
     workflow.add_edge("planner_output_failure", END)
     workflow.add_edge("mechanical_failure", END)
+    workflow.add_edge("verifier_failure", END)
     workflow.add_edge("output_failure", END)
     workflow.add_edge("partial_run_finalizer", END)
     return workflow.compile()

@@ -19,6 +19,7 @@ DEFAULT_MAX_FAILURE_FAMILY_ATTEMPTS = 5
 DEFAULT_MAX_MODEL_CALLS = 80
 DEFAULT_MAX_GOAL_ROLLBACKS = 1
 DEFAULT_MAX_ROLLBACK_GOALS = 6
+DEFAULT_MAX_GOAL_RETRIES = 2
 
 
 class ConfigurationError(ValueError):
@@ -97,6 +98,9 @@ def full_agent_reliability_settings() -> dict[str, int]:
         ),
         "max_rollback_goals": _positive_environment_int(
             "MAX_ROLLBACK_GOALS", DEFAULT_MAX_ROLLBACK_GOALS
+        ),
+        "max_goal_retries": _positive_environment_int(
+            "MAX_GOAL_RETRIES", DEFAULT_MAX_GOAL_RETRIES
         ),
     }
 

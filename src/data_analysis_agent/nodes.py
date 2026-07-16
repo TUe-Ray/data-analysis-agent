@@ -14,6 +14,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from data_analysis_agent.benchmark_context import build_public_analysis_context
+from data_analysis_agent.benchmark_types import PublicTaskView
 from data_analysis_agent.config import code_repair_settings, max_planner_repair_attempts
 from data_analysis_agent.final_output import (
     FinalGenerationRequest,
@@ -51,6 +53,7 @@ from data_analysis_agent.schemas import (
     IntermediateGoal,
     PythonGeneration,
     PythonRepair,
+    SuffixReplan,
     VerificationOutput,
 )
 from data_analysis_agent.state import AgentState, OutputValidationRecord
@@ -73,6 +76,39 @@ class VerifierOutputError(ValueError):
 
 class GoalArtifactDeclarationError(ValueError):
     """Raised when a script tries to publish an unsafe or missing artifact."""
+
+
+def _normalized_json_object(raw: str, *, allow_code: bool = False) -> str:
+    """Normalize unambiguous presentation differences at the model boundary.
+
+    This deliberately changes only representation: a single fenced JSON object,
+    whitespace, and legacy source text represented as ``code``.  Scientific
+    values and non-object responses remain untouched and fail strict Pydantic
+    validation normally.
+    """
+    text = raw.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(value, dict):
+        return text
+    if allow_code and "code" in value and "code_lines" not in value:
+        code = value.get("code")
+        if isinstance(code, str):
+            value.pop("code")
+            value["code_lines"] = code.splitlines()
+    # Some providers serialize the absence of irrelevant generated-python
+    # fields as null.  Canonicalize only those null-equivalent fields.
+    if value.get("strategy") == "generated_python":
+        if value.get("capability_name") is None:
+            value["capability_name"] = None
+        if value.get("arguments") is None:
+            value["arguments"] = {}
+    return json.dumps(value, ensure_ascii=False)
 
 
 def partial_run_finalizer_node(state: AgentState) -> dict[str, object]:
@@ -309,28 +345,8 @@ def _validate_plan(
             raise PlannerOutputError(
                 f"Goal {goal.goal_id!r} depends on a missing or later goal"
             )
-        goal_text = "\n".join(
-            [
-                goal.objective,
-                *goal.required_outputs,
-                *goal.constraints,
-                *goal.success_criteria,
-            ]
-        )
-        referenced = [
-            goal_id
-            for goal_id in seen
-            if re.search(
-                rf"(?<![A-Za-z0-9_]){re.escape(goal_id)}(?![A-Za-z0-9_])",
-                goal_text,
-            )
-        ]
-        omitted = [goal_id for goal_id in referenced if goal_id not in goal.depends_on]
-        if omitted:
-            raise PlannerOutputError(
-                f"Goal {goal.goal_id!r} references prior goal(s) without depending "
-                f"on them: {', '.join(omitted)}"
-            )
+        # Natural-language descriptions are not a dependency language.  The
+        # explicit depends_on list is the sole machine-readable contract.
         seen.add(goal.goal_id)
     if answer_schema:
         final_goal_id = plan.final_output_goal_id
@@ -341,6 +357,13 @@ def _validate_plan(
         if final_goal_id != plan.goals[-1].goal_id:
             raise PlannerOutputError("final_output_goal_id must identify the last goal")
         final_goal = plan.goals[-1]
+        # Legacy planners did not have output_paths.  Fill this structural
+        # field from the public schema, never from natural-language prose.
+        if not final_goal.output_paths:
+            plan.goals[-1] = final_goal.model_copy(
+                update={"output_paths": required_schema_paths(answer_schema)}
+            )
+            final_goal = plan.goals[-1]
         goals_by_id = {goal.goal_id: goal for goal in plan.goals}
         dependency_closure: set[str] = set()
         pending = list(final_goal.depends_on)
@@ -359,7 +382,7 @@ def _validate_plan(
             )
         required_paths = set(required_schema_paths(answer_schema))
         declared_paths = {
-            item.strip().removeprefix("$.") for item in final_goal.required_outputs
+            item.strip().removeprefix("$.") for item in final_goal.output_paths
         }
         missing_paths = sorted(
             path
@@ -371,10 +394,48 @@ def _validate_plan(
         )
         if missing_paths:
             raise PlannerOutputError(
-                "Final assembly goal does not cover required public output path(s): "
-                + ", ".join(missing_paths)
+                "Final assembly goal output_paths does not cover required public "
+                "output path(s): " + ", ".join(missing_paths)
             )
     return plan, True
+
+
+def _validate_suffix_replan(state: AgentState, raw_output: str) -> HighLevelPlan:
+    """Merge a model-authored suffix with an immutable retained prefix."""
+    try:
+        suffix = SuffixReplan.model_validate_json(_normalized_json_object(raw_output))
+    except ValidationError as error:
+        raise PlannerOutputError(
+            "Planner response is neither HighLevelPlan nor SuffixReplan"
+        ) from error
+    previous = HighLevelPlan.model_validate(state["high_level_plan"])
+    positions = {goal.goal_id: index for index, goal in enumerate(previous.goals)}
+    if suffix.replace_from_goal_id not in positions:
+        raise PlannerOutputError(
+            "replace_from_goal_id must identify a goal in the active plan"
+        )
+    start = positions[suffix.replace_from_goal_id]
+    completed = {
+        str(item.get("goal_id")) for item in state.get("completed_goal_results", [])
+    }
+    if suffix.replace_from_goal_id in completed:
+        raise PlannerOutputError(
+            "suffix replan may not replace a completed goal; use bounded rollback "
+            "explicitly"
+        )
+    plan = HighLevelPlan(
+        scientific_objective=previous.scientific_objective,
+        goals=[*previous.goals[:start], *suffix.replacement_goals],
+        final_output_goal_id=(
+            suffix.final_output_goal_id or previous.final_output_goal_id
+        ),
+    )
+    validated, _ = _validate_plan(
+        plan.model_dump_json(),
+        answer_schema=state.get("answer_schema"),
+        max_plan_goals=state.get("max_plan_goals", 100),
+    )
+    return validated
 
 
 def _validate_document_reconciliation_plan(
@@ -685,11 +746,17 @@ def planner_validator_node(state: AgentState) -> dict[str, object]:
     )
     mode = state.get("planner_mode", "initial")
     try:
-        plan, structured = _validate_plan(
-            raw_response,
-            answer_schema=state.get("answer_schema"),
-            max_plan_goals=state.get("max_plan_goals", 100),
-        )
+        try:
+            plan, structured = _validate_plan(
+                _normalized_json_object(raw_response),
+                answer_schema=state.get("answer_schema"),
+                max_plan_goals=state.get("max_plan_goals", 100),
+            )
+        except PlannerOutputError:
+            if state.get("planner_mode") != "scientific_replan":
+                raise
+            plan = _validate_suffix_replan(state, raw_response)
+            structured = True
         if structured:
             _validate_document_reconciliation_plan(state, plan)
         if state.get("planner_mode") == "scientific_replan" and structured:
@@ -903,6 +970,58 @@ def select_current_goal_node(state: AgentState) -> dict[str, object]:
         "execution_failure_category": None,
         "pending_goal_artifacts": [],
         "executor_strategy_repair_count": 0,
+        "goal_retry_count": 0,
+        "fresh_regeneration_used_for_current_goal": False,
+    }
+
+
+def goal_retry_node(state: AgentState) -> dict[str, object]:
+    """Retry the fixed scientific goal without touching plan-level state."""
+    count = state.get("goal_retry_count", 0) + 1
+    goal_id = str(state["current_goal"]["goal_id"])
+    history = [
+        *state.get("goal_retry_history", []),
+        {
+            "goal_id": goal_id,
+            "attempt": count,
+            "feedback": state.get("verification_feedback", ""),
+            "issue_classification": state.get(
+                "verification_issue_classification", "result"
+            ),
+        },
+    ]
+    # The failed attempt's files stay in its run directory for provenance but
+    # its unapproved declarations are not visible to the next attempt.
+    return {
+        "goal_retry_count": count,
+        "goal_retry_history": history,
+        "pending_goal_artifacts": [],
+        "code_repair_attempts_for_current_goal": 0,
+        "code_repair_no_progress_count": 0,
+        "code_repair_no_progress": False,
+        "consecutive_failure_family": None,
+        "consecutive_failure_fingerprint": None,
+        "generated_execution_history": [],
+        "current_generated_code": "",
+        "verification_decision": "RETRY_GOAL",
+        "trace": _trace(state, f"goal_retry:{goal_id}:attempt_{count}"),
+    }
+
+
+def fresh_regeneration_node(state: AgentState) -> dict[str, object]:
+    """Allow one complete new implementation after patch repair is exhausted."""
+    return {
+        "fresh_regeneration_used_for_current_goal": True,
+        "code_repair_attempts_for_current_goal": 0,
+        "code_repair_no_progress_count": 0,
+        "code_repair_no_progress": False,
+        "consecutive_failure_family": None,
+        "consecutive_failure_fingerprint": None,
+        "generated_execution_history": [],
+        "python_response_history": [],
+        "current_generated_code": "",
+        "pending_goal_artifacts": [],
+        "trace": _trace(state, "mechanical_repair:fresh_regeneration"),
     }
 
 
@@ -987,7 +1106,18 @@ def _goal_input_context(state: AgentState) -> str:
     profile = state.get("input_profile")
     if not isinstance(profile, dict):
         return ""
-    if not _dependency_goal_results(state):
+    dependencies = _dependency_goal_results(state)
+
+    def has_reconciliation_contract(item: dict[str, object]) -> bool:
+        result = item.get("result")
+        if not isinstance(result, dict):
+            return False
+        keys = {str(key).casefold() for key in result}
+        return any("effective" in key and "spec" in key for key in keys) and any(
+            "precedence" in key for key in keys
+        )
+
+    if not any(has_reconciliation_contract(item) for item in dependencies):
         return state.get("input_context", "")
     compact = dict(profile)
     compact["specification_documents"] = []
@@ -1039,6 +1169,114 @@ def _approved_artifact_context(state: AgentState) -> list[dict[str, object]]:
         }
         for artifact in _artifacts_available_to_current_goal(state)
     ]
+
+
+def _release_deferred_public_inputs(
+    state: AgentState, approved: list[GoalArtifact]
+) -> dict[str, object]:
+    """Idempotently stage the next public release only after verified evidence.
+
+    Gates intentionally refer to result keys and artifact schemas, never a plan
+    goal ID.  This keeps release behavior stable if the Planner names goals
+    differently while retaining a full provenance record for every copied file.
+    """
+    stages = state.get("release_stages", [])
+    history = list(state.get("release_history", []))
+    released = {str(item.get("stage")) for item in history}
+    next_stage = next(
+        (
+            stage
+            for stage in stages
+            if isinstance(stage, dict) and str(stage.get("name")) not in released
+        ),
+        None,
+    )
+    if next_stage is None:
+        return {}
+    required_keys = {str(item) for item in next_stage.get("required_result_keys", [])}
+    result = state.get("current_goal_result", {}).get("result", {})
+    if not isinstance(result, dict) or not required_keys.issubset(result):
+        return {}
+    required_columns = {
+        str(item) for item in next_stage.get("required_artifact_columns", [])
+    }
+    eligible = [
+        artifact
+        for artifact in approved
+        if required_columns.issubset(set(artifact.columns or []))
+    ]
+    if required_columns and not eligible:
+        return {}
+    files = next_stage.get("files", [])
+    if not isinstance(files, list) or any(not isinstance(name, str) for name in files):
+        return {}
+    sources = state.get("deferred_public_files", {})
+    if any(name not in sources for name in files):
+        return {}
+    staged_paths = [Path(path).resolve() for path in state.get("staged_file_paths", [])]
+    if not staged_paths:
+        return {}
+    input_root = staged_paths[0]
+    while input_root.name != "inputs" and input_root.parent != input_root:
+        input_root = input_root.parent
+    if input_root.name != "inputs":
+        return {}
+    current_contents = dict(state.get("public_data_contents", {}))
+    display_paths = list(state.get("staged_file_display_paths", []))
+    paths = list(state.get("staged_file_paths", []))
+    entries: list[dict[str, object]] = []
+    for name in files:
+        target = (input_root / name).resolve()
+        if input_root not in target.parents:
+            return {}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = str(sources[name])
+        target.write_text(content, encoding="utf-8")
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        staged_name = (Path("inputs") / name).as_posix()
+        current_contents[staged_name] = content
+        if staged_name not in display_paths:
+            display_paths.append(staged_name)
+            paths.append(str(target))
+        entries.append({"path": staged_name, "sha256": digest})
+    public = PublicTaskView(
+        task_id=str(state.get("public_task_id", "task")),
+        prompt_variant=str(state.get("public_prompt_variant", "default")),
+        prompt=state["question"],
+        data_files=display_paths,
+        data_contents=current_contents,
+        answer_schema=state.get("answer_schema", {}),
+        metadata=state.get("public_metadata", {}),
+        deferred_public_files={
+            name: value for name, value in sources.items() if name not in files
+        },
+        release_stages=stages,
+    )
+    profile = build_public_analysis_context(public, [Path(path) for path in paths])
+    history.append(
+        {
+            "stage": str(next_stage.get("name")),
+            "paths": entries,
+            "gate_result_keys": sorted(required_keys),
+            "gate_artifact_columns": sorted(required_columns),
+            "producer_provenance": [
+                {
+                    "goal_id": artifact.producer_goal_id,
+                    "artifact_id": artifact.artifact_id,
+                    "sha256": artifact.sha256,
+                }
+                for artifact in eligible
+            ],
+        }
+    )
+    return {
+        "staged_file_paths": paths,
+        "staged_file_display_paths": display_paths,
+        "public_data_contents": current_contents,
+        "input_profile": profile,
+        "input_context": json.dumps(profile, ensure_ascii=False, indent=2),
+        "release_history": history,
+    }
 
 
 def _is_private_or_diagnostic_artifact(relative_name: Path) -> bool:
@@ -1125,6 +1363,41 @@ def _declared_goal_artifacts(
     return artifacts
 
 
+def _recover_existing_artifact_manifest(
+    *, goal: IntermediateGoal, goal_directory: Path
+) -> list[GoalArtifact]:
+    """Build declarations only for existing eligible outputs after format failure.
+
+    This is deliberately a manifest-only recovery: it neither invokes scientific
+    code nor writes values.  The independent verifier still decides whether the
+    recovered file satisfies the goal contract.
+    """
+    recovered: list[GoalArtifact] = []
+    for path in sorted(goal_directory.rglob("*.csv")):
+        relative = path.relative_to(goal_directory)
+        if _is_private_or_diagnostic_artifact(relative):
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        columns, row_count = _tabular_artifact_metadata(path)
+        recovered.append(
+            GoalArtifact(
+                artifact_id=f"{goal.goal_id}:{relative.as_posix()}:{digest[:12]}",
+                producer_goal_id=goal.goal_id,
+                path=str(path.resolve()),
+                relative_name=relative.as_posix(),
+                media_type="text/csv",
+                description=(
+                    "Recovered existing analysis artifact after declaration repair."
+                ),
+                size_bytes=path.stat().st_size,
+                sha256=digest,
+                columns=columns,
+                row_count=row_count,
+            )
+        )
+    return recovered
+
+
 def _tabular_artifact_metadata(path: Path) -> tuple[list[str] | None, int | None]:
     """Capture CSV schema facts for downstream validation and repair prompts."""
     if path.suffix.lower() != ".csv":
@@ -1209,7 +1482,9 @@ def _python_contract_response(
         schema=contract_class.model_json_schema(),
     )
     try:
-        contract = contract_class.model_validate_json(raw)
+        contract = contract_class.model_validate_json(
+            _normalized_json_object(raw, allow_code=True)
+        )
     except ValidationError as error:
         raw_path = goal_directory / f"{artifact_prefix}_invalid_v{version}.txt"
         validation_path = (
@@ -1290,9 +1565,19 @@ def _generated_execution_update(
                 result=dict(final.result),
             )
         except GoalArtifactDeclarationError as error:
-            final.success = False
-            final.error = f"ResultContractError: {error}"
-            final.failure_category = "result_contract_error"
+            recovered = _recover_existing_artifact_manifest(
+                goal=goal, goal_directory=goal_directory
+            )
+            if recovered:
+                pending_artifacts = recovered
+                final.warnings.append(
+                    "Artifact declarations were repaired from existing goal-local "
+                    f"files without changing values: {error}"
+                )
+            else:
+                final.success = False
+                final.error = f"ResultContractError: {error}"
+                final.failure_category = "result_contract_error"
     final.artifact_paths = list(
         dict.fromkeys([*final.artifact_paths, *response_artifacts])
     )
@@ -1579,7 +1864,7 @@ def make_executor_node(
             completed_goal_results=_dependency_goal_results(state),
             verification_feedback=(
                 state.get("verification_feedback")
-                if state.get("verification_decision") == "REPLAN"
+                if state.get("verification_decision") in {"REPLAN", "RETRY_GOAL"}
                 else None
             ),
             capability_catalog=catalog,
@@ -1595,7 +1880,9 @@ def make_executor_node(
                 schema_name="executor_strategy",
                 schema=ExecutionStrategy.model_json_schema(),
             )
-            strategy = ExecutionStrategy.model_validate_json(raw_strategy)
+            strategy = ExecutionStrategy.model_validate_json(
+                _normalized_json_object(raw_strategy)
+            )
         except (ValidationError, ProviderResponseError) as error:
             strategy_error = error
             repaired = model.generate_structured(
@@ -1608,11 +1895,19 @@ def make_executor_node(
                 schema=ExecutionStrategy.model_json_schema(),
             )
             try:
-                strategy = ExecutionStrategy.model_validate_json(repaired)
+                strategy = ExecutionStrategy.model_validate_json(
+                    _normalized_json_object(repaired)
+                )
             except ValidationError as repair_error:
-                raise ExecutorOutputError(
-                    "Executor returned invalid ExecutionStrategy after one repair"
-                ) from repair_error
+                strategy = ExecutionStrategy(
+                    strategy="generated_python",
+                    capability_name=None,
+                    arguments={},
+                    concise_reason=(
+                        "Deterministic fallback after invalid executor strategy: "
+                        f"{repair_error}"
+                    ),
+                )
         normalization_warnings: list[str] = []
         if strategy.strategy == "generated_python" and (
             strategy.capability_name is not None or strategy.arguments
@@ -1673,7 +1968,7 @@ def make_executor_node(
                 ),
                 verification_feedback=(
                     state.get("verification_feedback")
-                    if state.get("verification_decision") == "REPLAN"
+                    if state.get("verification_decision") in {"REPLAN", "RETRY_GOAL"}
                     else None
                 ),
             )
@@ -1990,6 +2285,33 @@ def _upstream_attrition_conflict_error(
     return None
 
 
+def _validation_contract_error(
+    state: AgentState, result: dict[str, object]
+) -> str | None:
+    """Evaluate declarative, task-owned checks without private expected values."""
+    contract = state.get("public_metadata", {}).get("validation_contract", {})
+    if not isinstance(contract, dict):
+        return None
+    sections = contract.get("required_result_sections", [])
+    if isinstance(sections, list):
+        missing = [str(key) for key in sections if str(key) not in result]
+        if missing:
+            return "Missing required result section(s): " + ", ".join(missing)
+    columns = contract.get("required_artifact_columns", [])
+    if isinstance(columns, list) and columns:
+        required = {str(column) for column in columns}
+        artifacts = state.get("pending_goal_artifacts", [])
+        if artifacts and not any(
+            required.issubset(set(item.get("columns") or []))
+            for item in artifacts
+            if isinstance(item, dict)
+        ):
+            return "No declared artifact covers required columns: " + ", ".join(
+                sorted(required)
+            )
+    return None
+
+
 def _is_json_trailing_zero_only_replan(output: VerificationOutput) -> bool:
     """Recognize a verifier request that is impossible in JSON number semantics."""
     if output.decision != "REPLAN":
@@ -2165,12 +2487,20 @@ def make_verifier_node(model: RoleModel) -> Node:
             )
         validation_error: ValidationError | None = None
         for attempt in range(2):
-            raw_output = model.generate(role="verifier", messages=messages)
+            raw_output = model.generate_structured(
+                role="verifier",
+                messages=messages,
+                schema_name="verification_output",
+                schema=VerificationOutput.model_json_schema(),
+            )
             try:
-                output = VerificationOutput.model_validate_json(raw_output)
+                output = VerificationOutput.model_validate_json(
+                    _normalized_json_object(raw_output)
+                )
                 if _is_json_trailing_zero_only_replan(output):
                     output = VerificationOutput(
                         decision="PASS",
+                        issue_classification="none",
                         feedback=(
                             "Accepted: JSON numeric values do not preserve "
                             "insignificant trailing-zero display padding."
@@ -2185,20 +2515,32 @@ def make_verifier_node(model: RoleModel) -> Node:
                     upstream_attrition_error = _upstream_attrition_conflict_error(
                         state, current.result
                     )
+                    validation_contract_error = _validation_contract_error(
+                        state, current.result
+                    )
                     if contract_error:
                         output = VerificationOutput(
-                            decision="REPLAN",
+                            decision="RETRY_GOAL",
+                            issue_classification="result",
                             feedback=contract_error,
                         )
                     if attrition_error:
                         output = VerificationOutput(
-                            decision="REPLAN",
+                            decision="RETRY_GOAL",
+                            issue_classification="result",
                             feedback=attrition_error,
                         )
                     if upstream_attrition_error:
                         output = VerificationOutput(
-                            decision="REPLAN",
+                            decision="RETRY_GOAL",
+                            issue_classification="dependency_contract",
                             feedback=upstream_attrition_error,
+                        )
+                    if validation_contract_error:
+                        output = VerificationOutput(
+                            decision="RETRY_GOAL",
+                            issue_classification="result",
+                            feedback=validation_contract_error,
                         )
                 if (
                     structured
@@ -2207,7 +2549,8 @@ def make_verifier_node(model: RoleModel) -> Node:
                     ).success
                 ):
                     output = VerificationOutput(
-                        decision="REPLAN",
+                        decision="RETRY_GOAL",
+                        issue_classification="implementation",
                         feedback=(
                             "Execution failed and did not produce a result that can "
                             "satisfy the current goal."
@@ -2222,6 +2565,13 @@ def make_verifier_node(model: RoleModel) -> Node:
                         "Verifier -> Select Current Goal"
                         if has_more
                         else "Verifier -> Final Answer Generator"
+                    )
+                elif output.decision == "RETRY_GOAL":
+                    route = (
+                        "Verifier -> Goal Retry"
+                        if state.get("goal_retry_count", 0)
+                        < state.get("max_goal_retries", 2)
+                        else "Verifier -> Failure Finalizer"
                     )
                 else:
                     route = (
@@ -2250,9 +2600,11 @@ def make_verifier_node(model: RoleModel) -> Node:
                 updates: dict[str, object] = {
                     "verification_decision": output.decision,
                     "verification_feedback": output.feedback,
+                    "verification_issue_classification": output.issue_classification,
+                    "verifier_output_failed": False,
                     "failure_category": (
                         "scientific_verification_failure"
-                        if output.decision == "REPLAN"
+                        if output.decision != "PASS"
                         else None
                     ),
                     "trace": _trace(state, f"verifier:{output.decision}"),
@@ -2306,6 +2658,7 @@ def make_verifier_node(model: RoleModel) -> Node:
                     updates["approved_goal_artifacts_path"] = str(registry_path)
                     updates["pending_goal_artifacts"] = []
                     updates["current_goal_index"] = index + 1
+                    updates.update(_release_deferred_public_inputs(state, approved))
                 return updates
             except ValidationError as error:
                 validation_error = error
@@ -2315,9 +2668,17 @@ def make_verifier_node(model: RoleModel) -> Node:
                         {"role": "assistant", "content": raw_output},
                         {"role": "user", "content": VERIFIER_REPAIR_PROMPT},
                     ]
-        raise VerifierOutputError(
-            "Verifier returned invalid JSON after one repair attempt"
-        ) from validation_error
+        return {
+            "verifier_output_failed": True,
+            "verification_decision": "RETRY_GOAL",
+            "verification_feedback": (
+                "Verifier returned invalid JSON after bounded response repair: "
+                f"{validation_error}"
+            ),
+            "verification_issue_classification": "implementation",
+            "pending_goal_artifacts": [],
+            "trace": _trace(state, "verifier:INVALID"),
+        }
 
     return verifier
 
@@ -2454,22 +2815,62 @@ def make_output_repair_node(provider: FinalOutputProvider) -> Node:
 def max_replan_failure_node(state: AgentState) -> dict[str, object]:
     """Return explicit failure JSON when scientific verification never passes."""
     feedback = state.get("verification_feedback", "No verifier feedback provided.")
+    retry_exhausted = state.get("verification_decision") == "RETRY_GOAL"
     failure = FinalFailureAnswer(
-        status="stopped_after_max_replans",
+        status=(
+            "goal_retry_exhausted" if retry_exhausted else "stopped_after_max_replans"
+        ),
         answer=None,
         key_results={},
         limitations=["The latest execution result was not approved by the Verifier."],
         error=(
-            "Verification did not pass before the maximum replan count was reached. "
-            f"Latest verifier feedback: {feedback}"
+            (
+                "Goal-local scientific retry did not pass before its bounded retry "
+                "count was reached. "
+                if retry_exhausted
+                else (
+                    "Verification did not pass before the maximum replan count was "
+                    "reached. "
+                )
+            )
+            + f"Latest verifier feedback: {feedback}"
         ),
     )
     return {
         "final_answer": failure.model_dump_json(indent=2),
         "validated_final_answer": failure.model_dump(mode="json"),
-        "status": "stopped_after_max_replans",
-        "final_status": "stopped_after_max_replans",
-        "trace": _trace(state, "failure_finalizer:max_replans"),
+        "status": (
+            "goal_retry_exhausted" if retry_exhausted else "stopped_after_max_replans"
+        ),
+        "final_status": (
+            "goal_retry_exhausted" if retry_exhausted else "stopped_after_max_replans"
+        ),
+        "trace": _trace(
+            state,
+            (
+                "failure_finalizer:goal_retries"
+                if retry_exhausted
+                else "failure_finalizer:max_replans"
+            ),
+        ),
+    }
+
+
+def verifier_output_failure_node(state: AgentState) -> dict[str, object]:
+    """Turn malformed verifier output into an explicit typed workflow failure."""
+    failure = FinalFailureAnswer(
+        status="verifier_output_failed",
+        answer=None,
+        key_results={},
+        limitations=["The verifier could not produce a valid routing decision."],
+        error=str(state.get("verification_feedback", "Invalid verifier output")),
+    )
+    return {
+        "final_answer": failure.model_dump_json(indent=2),
+        "validated_final_answer": failure.model_dump(mode="json"),
+        "status": "verifier_output_failed",
+        "final_status": "verifier_output_failed",
+        "trace": _trace(state, "failure_finalizer:verifier_output"),
     }
 
 

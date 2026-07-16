@@ -1,0 +1,5 @@
+record_id,run_id,technical_duplicate
+R1,RUN1,no
+R2,RUN1,no
+R3,RUN2,no
+R4,RUN2,no

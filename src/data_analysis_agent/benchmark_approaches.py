@@ -810,6 +810,14 @@ def run_single_agent_checker(
     progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Run one iterative code agent and exactly one independent final checker."""
+    if public.deferred_public_files:
+        return ApproachOutcome(
+            status="not_applicable",
+            not_applicable_reason=(
+                "deferred evidence unavailable: this architecture has no verified "
+                "artifact-release transition"
+            ),
+        )
     core = _run_iterative_single_agent_core(
         public=public,
         model=model,
@@ -902,6 +910,14 @@ def run_single_agent(
     progress: ProgressCallback | None = None,
 ) -> ApproachOutcome:
     """Run the low architecture: shared analysis core with no model checker."""
+    if public.deferred_public_files:
+        return ApproachOutcome(
+            status="not_applicable",
+            not_applicable_reason=(
+                "deferred evidence unavailable: this architecture has no verified "
+                "artifact-release transition"
+            ),
+        )
     core = _run_iterative_single_agent_core(
         public=public,
         model=model,
@@ -961,6 +977,13 @@ def run_agent(
             "file_paths": [Path(path).name for path in public.data_files],
             "staged_file_paths": [str(path) for path in staged_files],
             "staged_file_display_paths": list(public.data_files),
+            "public_data_contents": dict(public.data_contents),
+            "public_metadata": dict(public.metadata),
+            "public_task_id": public.task_id,
+            "public_prompt_variant": public.prompt_variant,
+            "deferred_public_files": dict(public.deferred_public_files),
+            "release_stages": list(public.release_stages),
+            "release_history": [],
             "input_context": json.dumps(analysis_context, ensure_ascii=False, indent=2),
             "input_profile": analysis_context,
             "answer_schema": public.answer_schema,

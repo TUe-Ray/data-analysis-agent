@@ -1,0 +1,110 @@
+{
+  "public_files": [
+    "protocol/base_protocol.md",
+    "protocol/amendment_01.md",
+    "documentation/data_dictionary.csv",
+    "documentation/value_codebook.csv",
+    "release/release_manifest.json",
+    "stage_1/specimen_manifest.csv",
+    "stage_1/plate_controls.csv",
+    "stage_1/consent_and_arm.csv"
+  ],
+  "answer_schema": {
+    "type": "object",
+    "required": [
+      "status",
+      "answer",
+      "key_results",
+      "limitations"
+    ],
+    "properties": {
+      "status": {
+        "enum": [
+          "completed",
+          "completed_with_limitations"
+        ]
+      },
+      "answer": {
+        "type": "string"
+      },
+      "limitations": {
+        "type": "array"
+      },
+      "key_results": {
+        "type": "object",
+        "required": [
+          "release_audit",
+          "qc_attrition",
+          "analysis_attrition",
+          "arm_biomarker_summaries",
+          "response_summaries",
+          "between_arm_comparison",
+          "selected_subject_audit_rows"
+        ]
+      }
+    }
+  },
+  "metadata": {
+    "document_files": [
+      "protocol/base_protocol.md",
+      "protocol/amendment_01.md"
+    ],
+    "document_precedence": [
+      "amendment_01",
+      "base_protocol"
+    ],
+    "validation_contract": {
+      "required_result_sections": [
+        "release_audit",
+        "qc_attrition",
+        "analysis_attrition"
+      ]
+    }
+  },
+  "initial_public_files": [
+    "protocol/base_protocol.md",
+    "protocol/amendment_01.md",
+    "documentation/data_dictionary.csv",
+    "documentation/value_codebook.csv",
+    "release/release_manifest.json",
+    "stage_1/specimen_manifest.csv",
+    "stage_1/plate_controls.csv",
+    "stage_1/consent_and_arm.csv"
+  ],
+  "deferred_public_files": [
+    "stage_2/assay_measurements.csv",
+    "stage_2/assay_run_metadata.csv",
+    "stage_3/clinical_outcomes.csv",
+    "stage_3/source_subject_crosswalk.csv",
+    "stage_3/exclusion_events.csv"
+  ],
+  "release_stages": [
+    {
+      "name": "stage_2",
+      "files": [
+        "stage_2/assay_measurements.csv",
+        "stage_2/assay_run_metadata.csv"
+      ],
+      "required_artifact_columns": [
+        "analysis_subject_id",
+        "specimen_id",
+        "plate_id",
+        "arm_code",
+        "qc_status"
+      ]
+    },
+    {
+      "name": "stage_3",
+      "files": [
+        "stage_3/clinical_outcomes.csv",
+        "stage_3/source_subject_crosswalk.csv",
+        "stage_3/exclusion_events.csv"
+      ],
+      "required_artifact_columns": [
+        "analysis_subject_id",
+        "normalized_biomarker",
+        "selected_assay_record_id"
+      ]
+    }
+  ]
+}

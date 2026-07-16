@@ -39,6 +39,11 @@ class PublicTaskView(BaseModel):
     data_contents: dict[str, str]
     answer_schema: dict[str, JsonValue]
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    # Orchestrator-only deferred public inputs.  They are excluded from normal
+    # serialization and are never included in model-facing context before a
+    # verified release gate stages them.
+    deferred_public_files: dict[str, str] = Field(default_factory=dict, exclude=True)
+    release_stages: list[dict[str, JsonValue]] = Field(default_factory=list)
 
 
 class PrivateGradingSpec(BaseModel):

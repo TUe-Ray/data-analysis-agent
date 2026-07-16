@@ -1,0 +1,50 @@
+{
+  "absolute_tolerance": 1e-09,
+  "key_results": {
+    "release_audit": {
+      "released_stages": [
+        "stage_2",
+        "stage_3"
+      ]
+    },
+    "qc_attrition": {
+      "input_specimens": 4,
+      "approved_specimens": 2
+    },
+    "analysis_attrition": {
+      "qc_approved": 2,
+      "with_finite_biomarker": 1,
+      "with_selected_outcome": 1
+    },
+    "arm_biomarker_summaries": {
+      "A": {
+        "n": 1,
+        "mean": 1.2
+      },
+      "B": {
+        "n": 0,
+        "mean": null
+      }
+    },
+    "response_summaries": {
+      "A": {
+        "n": 1,
+        "mean": 5.0
+      },
+      "B": {
+        "n": 0,
+        "mean": null
+      }
+    },
+    "between_arm_comparison": {
+      "b_minus_a": null
+    },
+    "selected_subject_audit_rows": [
+      {
+        "analysis_subject_id": "A01",
+        "selected_assay_record_id": "R1",
+        "selected_visit_record_id": "V1"
+      }
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+source_subject_key,visit_record_id,day,response,quality
+X01,V1,35,5,high
+X02,V2,28,4,low
+X03,V3,42,9,high

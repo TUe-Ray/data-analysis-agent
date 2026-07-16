@@ -1,0 +1,5 @@
+plate_id,control_id,control_value,usable
+P1,C1,10,yes
+P1,C2,10,yes
+P2,C1,20,yes
+P2,C2,20,no

@@ -114,6 +114,9 @@ class IntermediateGoal(BaseModel):
     constraints: list[str]
     success_criteria: list[str]
     depends_on: list[str] = Field(default_factory=list)
+    # Machine-readable schema coverage.  Unlike required_outputs this is never
+    # inferred from prose and is therefore safe to validate deterministically.
+    output_paths: list[str] = Field(default_factory=list)
 
 
 class HighLevelPlan(BaseModel):
@@ -125,6 +128,17 @@ class HighLevelPlan(BaseModel):
     goals: list[IntermediateGoal] = Field(min_length=1)
     final_output_goal_id: str | None = None
     invalidate_from_goal_id: str | None = None
+
+
+class SuffixReplan(BaseModel):
+    """A scientific replan replaces only the unfinished suffix of a plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    replace_from_goal_id: str = Field(min_length=1)
+    replacement_goals: list[IntermediateGoal] = Field(min_length=1)
+    final_output_goal_id: str | None = None
+    reason: str = Field(min_length=1)
 
 
 class ExecutionStrategy(BaseModel):
@@ -171,7 +185,16 @@ class VerificationOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    decision: Literal["PASS", "REPLAN"]
+    decision: Literal["PASS", "RETRY_GOAL", "REPLAN"]
+    issue_classification: Literal[
+        "none",
+        "implementation",
+        "result",
+        "artifact_handoff",
+        "dependency_contract",
+        "plan_contract",
+        "evidence",
+    ] = "none"
     feedback: str = Field(min_length=1)
 
 
@@ -215,6 +238,8 @@ class FinalFailureAnswer(BaseModel):
         "python_policy_failure",
         "mechanical_execution_failed",
         "planner_output_failed",
+        "verifier_output_failed",
+        "goal_retry_exhausted",
     ]
     answer: str | None
     key_results: dict[str, JsonValue]

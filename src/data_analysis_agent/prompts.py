@@ -19,13 +19,13 @@ JSON-compatible facts (for example counts, finite statistics, or concise status
 facts) or explicitly declared analysis artifacts. Never require an in-memory
 DataFrame, Series, array, or other Python object to appear in a goal result; a
 tabular intermediate belongs in a declared artifact after its producing goal is
-verified. A scientific replan must return the full workflow. Keep completed goals
-unchanged unless invalidate_from_goal_id explicitly requests one bounded rollback;
-the workflow invalidates only that goal and its dependency descendants. Never
-reuse a retained completed goal_id for a new definition.
+verified. A scientific replan returns only a replacement suffix beginning at the
+failed unfinished goal; the runtime preserves completed definitions, results, and
+approved artifacts exactly. Never reuse a retained completed goal_id for a new
+definition.
 When a revised goal needs a prior approved artifact, explicitly list its producer
-goal_id in depends_on; artifacts are not otherwise available. If a goal text
-mentions a prior goal_id, include that exact goal_id in depends_on. A goal receives
+goal_id in depends_on; artifacts are not otherwise available. Dependencies must be
+declared in depends_on rather than inferred from goal prose. A goal receives
 JSON results from all declared dependencies and their upstream dependencies.
 When the public context contains a base specification, one or more amendments, and
 document-precedence metadata, begin with a compact specification-reconciliation
@@ -228,14 +228,15 @@ Apply this rubric:
     any result whose sequential removals plus final cohort do not equal the
     eligible cohort.
 
-Return PASS only when no material issue remains. Return REPLAN when correction is
-needed. Feedback must be concise, specific, and actionable. Return only valid JSON
-with exactly this shape:
-{"decision": "PASS" or "REPLAN", "feedback": "concise explanation"}"""
+Return PASS only when no material issue remains. Return RETRY_GOAL when the fixed
+goal can be regenerated with the same dependencies; return REPLAN only for a plan
+or dependency-contract defect. Classify the issue as none, implementation, result,
+artifact_handoff, dependency_contract, plan_contract, or evidence. Feedback must be
+concise, specific, and actionable. Return only valid JSON."""
 
 VERIFIER_REPAIR_PROMPT = """Your previous response was not valid for the required
-JSON schema. Return only one valid JSON object with decision set to PASS or REPLAN
-and a non-empty feedback string."""
+JSON schema. Return only one valid JSON object with decision set to PASS,
+RETRY_GOAL, or REPLAN, issue_classification, and a non-empty feedback string."""
 
 
 def build_planner_messages(
@@ -294,18 +295,21 @@ def build_planner_messages(
         parts.append(f"Verifier feedback:\n{verification_feedback}")
     if previous_plan is not None:
         parts.append(
-            "Scientific replan requirement: return the complete revised workflow, "
-            "not only residual goals."
+            "Scientific replan requirement: return a SuffixReplan JSON object: "
+            '{"replace_from_goal_id":"unfinished goal id","replacement_goals":['
+            '...],"final_output_goal_id":"...","reason":"..."}. Do not repeat '
+            "the retained prefix."
         )
-    parts.append(
-        "HighLevelPlan JSON schema summary:\n"
-        '{"scientific_objective":"string","goals":[{"goal_id":"string",'
-        '"objective":"string","required_outputs":["string"],'
-        '"constraints":["string"],"success_criteria":["string"],'
-        '"depends_on":["earlier_goal_id"]}],'
-        '"final_output_goal_id":"last_goal_id",'
-        '"invalidate_from_goal_id":null}'
-    )
+    if previous_plan is None:
+        parts.append(
+            "HighLevelPlan JSON schema summary:\n"
+            '{"scientific_objective":"string","goals":[{"goal_id":"string",'
+            '"objective":"string","required_outputs":["string"],'
+            '"constraints":["string"],"success_criteria":["string"],'
+            '"depends_on":["earlier_goal_id"]}],'
+            '"final_output_goal_id":"last_goal_id",'
+            '"invalidate_from_goal_id":null}'
+        )
     return [
         {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
         {"role": "user", "content": "\n\n".join(parts)},
