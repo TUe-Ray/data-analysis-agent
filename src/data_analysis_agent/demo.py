@@ -40,7 +40,7 @@ from data_analysis_agent.state import AgentState
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs"
 MAX_FILE_BYTES = 50 * 1024
-SUPPORTED_SUFFIXES = {".csv", ".txt"}
+SUPPORTED_SUFFIXES = {".csv", ".json", ".md", ".txt"}
 
 
 class DemoInputError(ValueError):

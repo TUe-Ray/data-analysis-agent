@@ -286,14 +286,17 @@ make install-studio
 configuration. The local Agent Server supplies in-memory persistence, enabling
 per-thread state, node traversal, and replay/time-travel while it is running.
 Studio's Input form exposes only `question` and `input_data`. Enter
-`input_data` as a list of absolute paths to local CSV or UTF-8 text files, for
-example `["/absolute/path/measurements.csv"]`; the initial `prepare_input` node
-validates and stages those files into the existing internal state. Normal demos,
-tests, and benchmark calls keep their unchanged full-state input path.
+`input_data` as one absolute file or folder path readable by the local Agent
+Server. A folder is searched recursively for `.csv`, `.txt`, `.md`, and `.json`
+files; `private`, `.git`, `.venv`, and `__pycache__` folders are skipped. The
+initial `prepare_input` node validates and stages the discovered files into the
+existing internal state. Normal demos, tests, and benchmark calls keep their
+unchanged full-state input path.
 
 When the Agent Server runs in WSL but Studio is open in Windows, `input_data`
-also accepts Windows paths such as `C:\\Users\\User1\\Downloads\\visits.csv`.
-They are automatically mapped to `/mnt/c/Users/User1/Downloads/visits.csv`.
+also accepts Windows paths such as
+`C:\\Users\\User1\\Downloads\\cross-study-studio`. They are automatically mapped
+to `/mnt/c/Users/User1/Downloads/cross-study-studio`.
 
 Studio's generated form does not provide a generic local-file drag-and-drop
 upload control. A drag-and-drop uploader would require a separate local web UI
