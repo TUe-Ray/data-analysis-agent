@@ -1,0 +1,13 @@
+field,physical_value,meaning
+alpha_consent,C_Y,consented
+alpha_consent,C_N,not consented
+alpha_status,V,valid
+alpha_status,R,reviewed accepted only by amendment
+alpha_status,RX,similar-looking rejected
+alpha_qc,AQ_OK,accepted
+alpha_qc,AQ_FAIL,rejected
+beta_consent,B_CONSENT,consented
+beta_status,OK,accepted
+beta_status,O_K,similar-looking rejected
+beta_qc,B_ACCEPT,accepted
+beta_qc,B_REJECT,rejected

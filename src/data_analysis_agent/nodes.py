@@ -345,8 +345,26 @@ def _validate_plan(
             raise PlannerOutputError(
                 f"Goal {goal.goal_id!r} depends on a missing or later goal"
             )
-        # Natural-language descriptions are not a dependency language.  The
-        # explicit depends_on list is the sole machine-readable contract.
+        # A prior goal ID named explicitly in a later goal's prose is a
+        # dependency claim, not merely descriptive text.  Require that claim
+        # to be represented in the executable dependency graph.
+        prose = " ".join(
+            [goal.objective, *goal.required_outputs, *goal.constraints]
+        ).casefold()
+        named_prior = [
+            prior
+            for prior in seen
+            if re.search(
+                rf"(?<![a-z0-9_-]){re.escape(prior.casefold())}(?![a-z0-9_-])",
+                prose,
+            )
+        ]
+        omitted = sorted(set(named_prior) - set(goal.depends_on))
+        if omitted:
+            raise PlannerOutputError(
+                f"Goal {goal.goal_id!r} references prior goal(s) without "
+                "depends_on: " + ", ".join(omitted)
+            )
         seen.add(goal.goal_id)
     if answer_schema:
         final_goal_id = plan.final_output_goal_id
@@ -357,13 +375,6 @@ def _validate_plan(
         if final_goal_id != plan.goals[-1].goal_id:
             raise PlannerOutputError("final_output_goal_id must identify the last goal")
         final_goal = plan.goals[-1]
-        # Legacy planners did not have output_paths.  Fill this structural
-        # field from the public schema, never from natural-language prose.
-        if not final_goal.output_paths:
-            plan.goals[-1] = final_goal.model_copy(
-                update={"output_paths": required_schema_paths(answer_schema)}
-            )
-            final_goal = plan.goals[-1]
         goals_by_id = {goal.goal_id: goal for goal in plan.goals}
         dependency_closure: set[str] = set()
         pending = list(final_goal.depends_on)
@@ -382,7 +393,8 @@ def _validate_plan(
             )
         required_paths = set(required_schema_paths(answer_schema))
         declared_paths = {
-            item.strip().removeprefix("$.") for item in final_goal.output_paths
+            item.strip().removeprefix("$.")
+            for item in (final_goal.output_paths or final_goal.required_outputs)
         }
         missing_paths = sorted(
             path
@@ -2668,6 +2680,11 @@ def make_verifier_node(model: RoleModel) -> Node:
                         {"role": "assistant", "content": raw_output},
                         {"role": "user", "content": VERIFIER_REPAIR_PROMPT},
                     ]
+        if not structured:
+            raise VerifierOutputError(
+                "Verifier returned invalid JSON after one repair attempt: "
+                + str(validation_error)
+            )
         return {
             "verifier_output_failed": True,
             "verification_decision": "RETRY_GOAL",

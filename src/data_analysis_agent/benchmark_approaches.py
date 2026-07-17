@@ -993,6 +993,7 @@ def run_agent(
             "run_directory": str(agent_directory),
             "replan_count": 0,
             "max_replans": config.max_replans,
+            "fresh_regeneration_enabled": True,
             "stop_after_goals": config.stop_after_goals,
             "output_repair_count": 0,
             "max_output_repairs": 1,

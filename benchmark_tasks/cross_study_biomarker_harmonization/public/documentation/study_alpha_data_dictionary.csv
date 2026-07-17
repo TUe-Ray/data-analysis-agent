@@ -1,0 +1,4 @@
+table,column,meaning
+study_alpha_subjects,source_subject_id,source participant key
+study_alpha_visits,technical_row_id,technical row excluded from logical identity
+study_alpha_assays,assay_record_id,scientific replicate ID

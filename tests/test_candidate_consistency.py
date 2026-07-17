@@ -17,7 +17,7 @@ from data_analysis_agent.benchmark_tasks import load_benchmark_task, stage_publi
 from data_analysis_agent.candidate_consistency import (
     build_candidate_consistency_evidence,
 )
-from scripts.build_distributed_longitudinal_task import compute_oracle
+from data_analysis_agent.task_builders.distributed_longitudinal import compute_oracle
 
 TASK_ID = "longitudinal_treatment_response_distributed"
 

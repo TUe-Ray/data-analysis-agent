@@ -27,7 +27,7 @@ from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import ScriptedRoleModel
 from data_analysis_agent.nodes import _artifacts_available_to_current_goal
 from data_analysis_agent.python_runner import LocalPythonRunner
-from scripts import build_distributed_longitudinal_task as builder
+from data_analysis_agent.task_builders import distributed_longitudinal as builder
 
 TASK_ID = "longitudinal_treatment_response_distributed"
 

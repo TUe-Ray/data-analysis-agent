@@ -1,0 +1,4 @@
+study,identifier,use
+Alpha,source_subject_id,map against alpha subject table
+Beta,visit_source_id,map visits through crosswalk
+Beta,event_source_id,map exclusions through crosswalk

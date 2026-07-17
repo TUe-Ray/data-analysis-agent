@@ -1,0 +1,1 @@
+Use all public protocol, amendment, dictionary, codebook, crosswalk, and raw-data files. Respect precedence, determine the harmonization plan, return the exact JSON with complete audit records, and avoid causal claims and hypothesis tests.

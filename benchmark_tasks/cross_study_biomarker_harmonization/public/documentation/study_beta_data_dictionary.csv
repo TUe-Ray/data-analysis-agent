@@ -1,0 +1,4 @@
+table,column,meaning
+study_beta_subject_crosswalk,visit_source_id,visit mapping key
+study_beta_exclusions,event_source_id,different exclusion mapping key
+study_beta_assays,specimen_id,replicate aggregation key

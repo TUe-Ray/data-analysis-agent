@@ -101,7 +101,9 @@ def route_after_execution(
         "max_code_repair_attempts", 8
     ):
         return "mechanical_repair"
-    if not state.get("fresh_regeneration_used_for_current_goal", False):
+    if state.get("fresh_regeneration_enabled", False) and not state.get(
+        "fresh_regeneration_used_for_current_goal", False
+    ):
         return "fresh_regeneration"
     return "mechanical_failure"
 

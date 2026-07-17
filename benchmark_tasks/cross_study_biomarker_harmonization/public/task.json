@@ -1,0 +1,535 @@
+{
+  "public_files": [
+    "protocol/study_alpha_protocol.md",
+    "protocol/study_alpha_amendment_01.md",
+    "protocol/study_beta_protocol.md",
+    "protocol/harmonization_plan.md",
+    "documentation/study_alpha_data_dictionary.csv",
+    "documentation/study_beta_data_dictionary.csv",
+    "documentation/value_codebook.csv",
+    "documentation/identifier_crosswalk_dictionary.csv",
+    "data/study_alpha_subjects.csv",
+    "data/study_alpha_visits.csv",
+    "data/study_alpha_assays.csv",
+    "data/study_alpha_exclusions.csv",
+    "data/study_beta_subjects.csv",
+    "data/study_beta_visits.csv",
+    "data/study_beta_assays.csv",
+    "data/study_beta_exclusions.csv",
+    "data/study_beta_subject_crosswalk.csv"
+  ],
+  "answer_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "status",
+      "answer",
+      "key_results",
+      "limitations"
+    ],
+    "properties": {
+      "status": {
+        "enum": [
+          "completed"
+        ]
+      },
+      "answer": {
+        "type": "string"
+      },
+      "limitations": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "key_results": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "study_attrition",
+          "study_statistics",
+          "study_between_arm_comparisons",
+          "pooled_comparison",
+          "selected_pairs",
+          "data_quality_audit"
+        ],
+        "properties": {
+          "study_attrition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "alpha",
+              "beta"
+            ],
+            "properties": {
+              "alpha": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "total_subjects",
+                  "basic_ineligible",
+                  "eligible_after_basic_checks",
+                  "excluded_pre_start",
+                  "no_valid_baseline",
+                  "no_valid_followup",
+                  "excluded_post_start_before_followup",
+                  "complete_pairs",
+                  "complete_pairs_arm_a",
+                  "complete_pairs_arm_b"
+                ],
+                "properties": {
+                  "total_subjects": {
+                    "type": "integer"
+                  },
+                  "basic_ineligible": {
+                    "type": "integer"
+                  },
+                  "eligible_after_basic_checks": {
+                    "type": "integer"
+                  },
+                  "excluded_pre_start": {
+                    "type": "integer"
+                  },
+                  "no_valid_baseline": {
+                    "type": "integer"
+                  },
+                  "no_valid_followup": {
+                    "type": "integer"
+                  },
+                  "excluded_post_start_before_followup": {
+                    "type": "integer"
+                  },
+                  "complete_pairs": {
+                    "type": "integer"
+                  },
+                  "complete_pairs_arm_a": {
+                    "type": "integer"
+                  },
+                  "complete_pairs_arm_b": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "beta": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "total_subjects",
+                  "basic_ineligible",
+                  "eligible_after_basic_checks",
+                  "excluded_pre_start",
+                  "no_valid_baseline",
+                  "no_valid_followup",
+                  "excluded_post_start_before_followup",
+                  "complete_pairs",
+                  "complete_pairs_arm_a",
+                  "complete_pairs_arm_b"
+                ],
+                "properties": {
+                  "total_subjects": {
+                    "type": "integer"
+                  },
+                  "basic_ineligible": {
+                    "type": "integer"
+                  },
+                  "eligible_after_basic_checks": {
+                    "type": "integer"
+                  },
+                  "excluded_pre_start": {
+                    "type": "integer"
+                  },
+                  "no_valid_baseline": {
+                    "type": "integer"
+                  },
+                  "no_valid_followup": {
+                    "type": "integer"
+                  },
+                  "excluded_post_start_before_followup": {
+                    "type": "integer"
+                  },
+                  "complete_pairs": {
+                    "type": "integer"
+                  },
+                  "complete_pairs_arm_a": {
+                    "type": "integer"
+                  },
+                  "complete_pairs_arm_b": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          },
+          "study_statistics": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "alpha",
+              "beta"
+            ],
+            "properties": {
+              "alpha": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "A",
+                  "B"
+                ],
+                "properties": {
+                  "A": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "n",
+                      "mean_baseline",
+                      "mean_followup",
+                      "mean_change",
+                      "sample_sd_change",
+                      "sample_se_change"
+                    ],
+                    "properties": {
+                      "n": {
+                        "type": "integer"
+                      },
+                      "mean_baseline": {
+                        "type": "number"
+                      },
+                      "mean_followup": {
+                        "type": "number"
+                      },
+                      "mean_change": {
+                        "type": "number"
+                      },
+                      "sample_sd_change": {
+                        "type": "number"
+                      },
+                      "sample_se_change": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "B": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "n",
+                      "mean_baseline",
+                      "mean_followup",
+                      "mean_change",
+                      "sample_sd_change",
+                      "sample_se_change"
+                    ],
+                    "properties": {
+                      "n": {
+                        "type": "integer"
+                      },
+                      "mean_baseline": {
+                        "type": "number"
+                      },
+                      "mean_followup": {
+                        "type": "number"
+                      },
+                      "mean_change": {
+                        "type": "number"
+                      },
+                      "sample_sd_change": {
+                        "type": "number"
+                      },
+                      "sample_se_change": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              },
+              "beta": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "A",
+                  "B"
+                ],
+                "properties": {
+                  "A": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "n",
+                      "mean_baseline",
+                      "mean_followup",
+                      "mean_change",
+                      "sample_sd_change",
+                      "sample_se_change"
+                    ],
+                    "properties": {
+                      "n": {
+                        "type": "integer"
+                      },
+                      "mean_baseline": {
+                        "type": "number"
+                      },
+                      "mean_followup": {
+                        "type": "number"
+                      },
+                      "mean_change": {
+                        "type": "number"
+                      },
+                      "sample_sd_change": {
+                        "type": "number"
+                      },
+                      "sample_se_change": {
+                        "type": "number"
+                      }
+                    }
+                  },
+                  "B": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "n",
+                      "mean_baseline",
+                      "mean_followup",
+                      "mean_change",
+                      "sample_sd_change",
+                      "sample_se_change"
+                    ],
+                    "properties": {
+                      "n": {
+                        "type": "integer"
+                      },
+                      "mean_baseline": {
+                        "type": "number"
+                      },
+                      "mean_followup": {
+                        "type": "number"
+                      },
+                      "mean_change": {
+                        "type": "number"
+                      },
+                      "sample_sd_change": {
+                        "type": "number"
+                      },
+                      "sample_se_change": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "study_between_arm_comparisons": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "alpha",
+              "beta"
+            ],
+            "properties": {
+              "alpha": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "difference_in_mean_change_b_minus_a",
+                  "variance_of_difference",
+                  "inverse_variance_weight"
+                ],
+                "properties": {
+                  "difference_in_mean_change_b_minus_a": {
+                    "type": "number"
+                  },
+                  "variance_of_difference": {
+                    "type": "number"
+                  },
+                  "inverse_variance_weight": {
+                    "type": "number"
+                  }
+                }
+              },
+              "beta": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "difference_in_mean_change_b_minus_a",
+                  "variance_of_difference",
+                  "inverse_variance_weight"
+                ],
+                "properties": {
+                  "difference_in_mean_change_b_minus_a": {
+                    "type": "number"
+                  },
+                  "variance_of_difference": {
+                    "type": "number"
+                  },
+                  "inverse_variance_weight": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          },
+          "pooled_comparison": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pooled_difference_in_mean_change_b_minus_a",
+              "sum_of_inverse_variance_weights"
+            ],
+            "properties": {
+              "pooled_difference_in_mean_change_b_minus_a": {
+                "type": "number"
+              },
+              "sum_of_inverse_variance_weights": {
+                "type": "number"
+              }
+            }
+          },
+          "selected_pairs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "study_id",
+                "analysis_subject_id",
+                "arm",
+                "baseline_visit_record_id",
+                "followup_visit_record_id",
+                "baseline_assay_record_ids",
+                "followup_assay_record_ids",
+                "baseline_harmonized_value",
+                "followup_harmonized_value",
+                "change"
+              ],
+              "properties": {
+                "study_id": {
+                  "enum": [
+                    "alpha",
+                    "beta"
+                  ]
+                },
+                "analysis_subject_id": {
+                  "type": "string"
+                },
+                "arm": {
+                  "enum": [
+                    "A",
+                    "B"
+                  ]
+                },
+                "baseline_visit_record_id": {
+                  "type": "string"
+                },
+                "followup_visit_record_id": {
+                  "type": "string"
+                },
+                "baseline_assay_record_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "followup_assay_record_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "baseline_harmonized_value": {
+                  "type": "number"
+                },
+                "followup_harmonized_value": {
+                  "type": "number"
+                },
+                "change": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "data_quality_audit": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "alpha",
+              "beta"
+            ],
+            "properties": {
+              "alpha": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "scientific_duplicate_rows_removed",
+                  "invalid_visit_rows_excluded",
+                  "invalid_assay_rows_excluded",
+                  "insufficient_replicate_specimens"
+                ],
+                "properties": {
+                  "scientific_duplicate_rows_removed": {
+                    "type": "integer"
+                  },
+                  "invalid_visit_rows_excluded": {
+                    "type": "integer"
+                  },
+                  "invalid_assay_rows_excluded": {
+                    "type": "integer"
+                  },
+                  "insufficient_replicate_specimens": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "beta": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "scientific_duplicate_rows_removed",
+                  "invalid_visit_rows_excluded",
+                  "invalid_assay_rows_excluded",
+                  "insufficient_replicate_specimens"
+                ],
+                "properties": {
+                  "scientific_duplicate_rows_removed": {
+                    "type": "integer"
+                  },
+                  "invalid_visit_rows_excluded": {
+                    "type": "integer"
+                  },
+                  "invalid_assay_rows_excluded": {
+                    "type": "integer"
+                  },
+                  "insufficient_replicate_specimens": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "metadata": {
+    "description": "Fully static cross-study biomarker harmonization",
+    "document_files": [
+      "protocol/study_alpha_protocol.md",
+      "protocol/study_alpha_amendment_01.md",
+      "protocol/study_beta_protocol.md",
+      "protocol/harmonization_plan.md",
+      "documentation/study_alpha_data_dictionary.csv",
+      "documentation/study_beta_data_dictionary.csv",
+      "documentation/value_codebook.csv",
+      "documentation/identifier_crosswalk_dictionary.csv"
+    ],
+    "document_precedence": [
+      "Alpha amendment supersedes only conflicting Alpha rules",
+      "Beta does not inherit Alpha amendment",
+      "Harmonization follows study-specific rules"
+    ],
+    "static_fairness": {
+      "all_public_files_staged_initially": true,
+      "deferred_files": [],
+      "release_gates": []
+    }
+  }
+}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import runpy
 from pathlib import Path
 
 from data_analysis_agent.benchmark_context import build_public_analysis_context
@@ -13,18 +12,18 @@ from data_analysis_agent.nodes import (
     _release_deferred_public_inputs,
 )
 from data_analysis_agent.schemas import GoalArtifact, PythonGeneration
+from data_analysis_agent.task_builders import adaptive_biomarker as BUILDER
 
-BUILDER = runpy.run_path("scripts/build_adaptive_biomarker_tasks.py")
 TASKS_ROOT = Path(__file__).resolve().parents[1] / "benchmark_tasks"
 
 
 def test_builder_is_deterministic_and_gated_stage_is_not_initially_readable(
     tmp_path: Path,
 ) -> None:
-    assert BUILDER["generated_files"]() == BUILDER["generated_files"]()
-    task = load_benchmark_task(TASKS_ROOT, BUILDER["GATED"])
+    assert BUILDER.generated_files() == BUILDER.generated_files()
+    task = load_benchmark_task(TASKS_ROOT, BUILDER.GATED)
     public = stage_public_task(task.public, tmp_path)
-    assert len(public.data_files) == len(BUILDER["STAGE_1"])
+    assert len(public.data_files) == len(BUILDER.STAGE_1)
     assert not (tmp_path / "inputs/stage_2/assay_measurements.csv").exists()
     context = json.dumps(
         build_public_analysis_context(
@@ -36,7 +35,7 @@ def test_builder_is_deterministic_and_gated_stage_is_not_initially_readable(
 
 
 def test_verified_qc_columns_release_exactly_stage_two(tmp_path: Path) -> None:
-    task = load_benchmark_task(TASKS_ROOT, BUILDER["GATED"])
+    task = load_benchmark_task(TASKS_ROOT, BUILDER.GATED)
     public = stage_public_task(task.public, tmp_path)
     paths = [(tmp_path / item).resolve() for item in public.data_files]
     artifact = GoalArtifact(
