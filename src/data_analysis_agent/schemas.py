@@ -146,7 +146,7 @@ class ExecutionStrategy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    strategy: Literal["trusted_tool", "generated_python"]
+    strategy: Literal["trusted_tool", "generated_python", "structured_result"]
     capability_name: str | None = None
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
     concise_reason: str = Field(min_length=1)
@@ -172,12 +172,21 @@ class GoalResult(BaseModel):
 
     goal_id: str
     success: bool
-    strategy: Literal["trusted_tool", "generated_python"]
+    strategy: Literal["trusted_tool", "generated_python", "structured_result"]
     capability_name: str | None = None
     result: dict[str, JsonValue]
     warnings: list[str]
     error: str | None = None
     artifact_paths: list[str]
+
+
+class StructuredResult(BaseModel):
+    """Compact non-code execution result for document-reconciliation goals."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: dict[str, JsonValue]
+    warnings: list[StrictStr] = Field(default_factory=list)
 
 
 class VerificationOutput(BaseModel):

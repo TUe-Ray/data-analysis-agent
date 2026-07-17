@@ -94,10 +94,7 @@ def test_code_architectures_receive_identical_public_context_and_paths(
 
     assert "complete cohort as a declared" in planner_messages[0]["content"]
     assert "sole cohort source" in planner_messages[0]["content"]
-    assert (
-        "one independently verifiable\ngoal per rule system"
-        in planner_messages[0]["content"]
-    )
+    assert "single\ncohort-producing goal may apply" in planner_messages[0]["content"]
 
     private_reference = Path(task.private.reference_path).read_text(encoding="utf-8")
     assert private_reference not in serialized

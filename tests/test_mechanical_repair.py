@@ -402,7 +402,9 @@ def test_default_no_progress_limit_prevents_eighteen_same_family_repairs(
     assert result["status"] == "mechanical_execution_failed"
     assert result["code_repair_attempts_for_current_goal"] == 2
     structured_calls = [
-        call for call in model.calls if call.structured_schema_name is not None
+        call
+        for call in model.calls
+        if call.role == "executor" and call.structured_schema_name is not None
     ]
     # executor strategy + initial Python generation + two Python repairs
     assert len(structured_calls) == 4

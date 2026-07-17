@@ -35,6 +35,7 @@ from data_analysis_agent.prompts import (
     build_planner_repair_messages,
     build_python_generation_messages,
     build_python_repair_messages,
+    build_structured_result_messages,
     build_verifier_messages,
 )
 from data_analysis_agent.public_schema import (
@@ -57,6 +58,7 @@ from data_analysis_agent.schemas import (
     IntermediateGoal,
     PythonGeneration,
     PythonRepair,
+    StructuredResult,
     SuffixReplan,
     VerificationOutput,
 )
@@ -348,26 +350,6 @@ def _validate_plan(
         if unknown:
             raise PlannerOutputError(
                 f"Goal {goal.goal_id!r} depends on a missing or later goal"
-            )
-        # A prior goal ID named explicitly in a later goal's prose is a
-        # dependency claim, not merely descriptive text.  Require that claim
-        # to be represented in the executable dependency graph.
-        prose = " ".join(
-            [goal.objective, *goal.required_outputs, *goal.constraints]
-        ).casefold()
-        named_prior = [
-            prior
-            for prior in seen
-            if re.search(
-                rf"(?<![a-z0-9_-]){re.escape(prior.casefold())}(?![a-z0-9_-])",
-                prose,
-            )
-        ]
-        omitted = sorted(set(named_prior) - set(goal.depends_on))
-        if omitted:
-            raise PlannerOutputError(
-                f"Goal {goal.goal_id!r} references prior goal(s) without "
-                "depends_on: " + ", ".join(omitted)
             )
         seen.add(goal.goal_id)
     if answer_schema:
@@ -722,8 +704,14 @@ def make_planner_node(model: RoleModel) -> Node:
         run_directory = state.get("run_directory") or str(
             Path.cwd() / "runs" / f"run_{run_id}"
         )
-        raw_plan = model.generate(role="planner", messages=messages)
         mode = "scientific_replan" if is_replan else "initial"
+        contract_class = SuffixReplan if is_replan else HighLevelPlan
+        raw_plan = model.generate_structured(
+            role="planner",
+            messages=messages,
+            schema_name=("suffix_replan" if is_replan else "high_level_plan"),
+            schema=contract_class.model_json_schema(),
+        )
         return {
             "replan_count": replan_count,
             "max_replans": state.get("max_replans", 1),
@@ -906,7 +894,9 @@ def make_planner_repair_node(model: RoleModel) -> Node:
 
     def planner_repair(state: AgentState) -> dict[str, object]:
         attempt = state.get("planner_repair_count", 0) + 1
-        raw_response = model.generate(
+        is_replan = state.get("planner_mode") == "scientific_replan"
+        contract_class = SuffixReplan if is_replan else HighLevelPlan
+        raw_response = model.generate_structured(
             role="planner",
             messages=build_planner_repair_messages(
                 question=state["question"],
@@ -938,7 +928,12 @@ def make_planner_repair_node(model: RoleModel) -> Node:
                 answer_schema=state.get("answer_schema"),
                 required_output_paths=required_schema_paths(state.get("answer_schema")),
                 max_plan_goals=state.get("max_plan_goals", 6),
+                planner_mode=state.get("planner_mode", "initial"),
             ),
+            schema_name=(
+                "suffix_replan_repair" if is_replan else "high_level_plan_repair"
+            ),
+            schema=contract_class.model_json_schema(),
         )
         return {
             **_planner_response_update(
@@ -1004,6 +999,8 @@ def goal_retry_node(state: AgentState) -> dict[str, object]:
             "issue_classification": state.get(
                 "verification_issue_classification", "result"
             ),
+            "previous_result": state.get("current_goal_result", {}).get("result", {}),
+            "previous_source": state.get("current_generated_code", ""),
         },
     ]
     # The failed attempt's files stay in its run directory for provenance but
@@ -1946,6 +1943,28 @@ def make_executor_node(
                     ),
                 )
         normalization_warnings: list[str] = []
+        strategy_goal = IntermediateGoal.model_validate(state["current_goal"])
+        output_contract = " ".join(strategy_goal.required_outputs).casefold()
+        is_document_reconciliation = (
+            all(
+                term in output_contract
+                for term in ("effective", "mapping", "precedence")
+            )
+            and "artifact" not in output_contract
+            and not strategy_goal.depends_on
+        )
+        if is_document_reconciliation and strategy.strategy == "generated_python":
+            strategy = strategy.model_copy(
+                update={
+                    "strategy": "structured_result",
+                    "capability_name": None,
+                    "arguments": {},
+                }
+            )
+            normalization_warnings.append(
+                "Selected structured_result for a compact document-reconciliation "
+                "goal."
+            )
         if strategy.strategy == "generated_python" and (
             strategy.capability_name is not None or strategy.arguments
         ):
@@ -1954,6 +1973,16 @@ def make_executor_node(
             )
             normalization_warnings.append(
                 "Normalized generated_python capability_name to null and "
+                "arguments to {}."
+            )
+        if strategy.strategy == "structured_result" and (
+            strategy.capability_name is not None or strategy.arguments
+        ):
+            strategy = strategy.model_copy(
+                update={"capability_name": None, "arguments": {}}
+            )
+            normalization_warnings.append(
+                "Normalized structured_result capability_name to null and "
                 "arguments to {}."
             )
         if strategy.strategy == "trusted_tool":
@@ -1988,6 +2017,58 @@ def make_executor_node(
             script_increment = 0
             repair_increment = 0
             tool_increment = 1
+        elif strategy.strategy == "structured_result":
+            goal = IntermediateGoal.model_validate(state["current_goal"])
+            previous_attempt_result: dict[str, object] | None = None
+            if state.get("verification_decision") == "RETRY_GOAL":
+                previous = state.get("current_goal_result")
+                if isinstance(previous, dict) and isinstance(
+                    previous.get("result"), dict
+                ):
+                    previous_attempt_result = previous["result"]
+            raw_result = model.generate_structured(
+                role="executor",
+                messages=build_structured_result_messages(
+                    current_goal=goal.model_dump(mode="json"),
+                    input_context=_goal_input_context(state),
+                    completed_goal_results=_dependency_goal_results(state),
+                    verification_feedback=(
+                        state.get("verification_feedback")
+                        if state.get("verification_decision") == "RETRY_GOAL"
+                        else None
+                    ),
+                    previous_attempt_result=previous_attempt_result,
+                ),
+                schema_name="structured_result",
+                schema=StructuredResult.model_json_schema(),
+            )
+            structured_result = StructuredResult.model_validate_json(
+                _normalized_json_object(raw_result)
+            )
+            payload_error = _goal_result_limit_error(state, structured_result.result)
+            goal_result = GoalResult(
+                goal_id=goal.goal_id,
+                success=payload_error is None,
+                strategy="structured_result",
+                capability_name=None,
+                result=structured_result.result if payload_error is None else {},
+                warnings=list(structured_result.warnings),
+                error=(
+                    f"ResultContractError: {payload_error}" if payload_error else None
+                ),
+                artifact_paths=[],
+            )
+            execution_result = json.dumps(
+                {
+                    "success": goal_result.success,
+                    "result": goal_result.result,
+                    "warnings": goal_result.warnings,
+                    "error": goal_result.error,
+                }
+            )
+            script_increment = 0
+            repair_increment = 0
+            tool_increment = 0
         else:
             goal = IntermediateGoal.model_validate(state["current_goal"])
             goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
@@ -2843,11 +2924,25 @@ def make_verifier_node(model: RoleModel) -> Node:
                     )
                 if structured:
                     current = GoalResult.model_validate(state["current_goal_result"])
+                    current_goal = IntermediateGoal.model_validate(
+                        state["current_goal"]
+                    )
+                    is_final_goal = (
+                        current_goal.goal_id == state.get("final_output_goal_id")
+                    )
                     contract_error = _reconciliation_contract_error(
                         state, current.result
                     )
-                    attrition_error = _attrition_consistency_error(current.result)
-                    cross_study_error = _cross_study_consistency_error(current.result)
+                    attrition_error = (
+                        _attrition_consistency_error(current.result)
+                        if is_final_goal
+                        else None
+                    )
+                    cross_study_error = (
+                        _cross_study_consistency_error(current.result)
+                        if is_final_goal
+                        else None
+                    )
                     upstream_attrition_error = _upstream_attrition_conflict_error(
                         state, current.result
                     )

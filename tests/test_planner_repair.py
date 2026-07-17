@@ -7,7 +7,7 @@ import pytest
 
 from data_analysis_agent.graph import build_graph
 from data_analysis_agent.models import ScriptedRoleModel
-from data_analysis_agent.nodes import PlannerOutputError, _validate_plan
+from data_analysis_agent.nodes import _validate_plan
 
 
 def _plan(*goal_ids: str) -> str:
@@ -83,13 +83,14 @@ def _dependency_plan(dependency: str, *, forward: bool = False) -> str:
     return json.dumps({"scientific_objective": "Return values.", "goals": goals})
 
 
-def test_plan_rejects_omitted_dependency_explicitly_named_by_goal() -> None:
+@pytest.mark.parametrize("word", ["rules", "statistics", "analysis", "cohort"])
+def test_plan_does_not_infer_dependency_from_goal_prose(word: str) -> None:
     payload = json.loads(_plan("g1", "g2"))
-    payload["goals"][1]["objective"] = "Use the cleaned records from g1."
+    payload["goals"][0]["goal_id"] = word
+    payload["goals"][1]["objective"] = f"Use the cleaned {word} records."
     payload["goals"][1]["depends_on"] = []
 
-    with pytest.raises(PlannerOutputError, match="references prior goal"):
-        _validate_plan(json.dumps(payload))
+    _validate_plan(json.dumps(payload))
 
 
 @pytest.mark.parametrize(
@@ -216,7 +217,11 @@ def test_scientific_replan_repair_receives_immutable_completed_definitions(
     repair_prompt = planner_calls[-1].messages[1]["content"]
     assert "Immutable completed goal definitions" in repair_prompt
     assert '"goal_id": "G1"' in repair_prompt
-    assert "never only its uncompleted suffix" in repair_prompt
+    assert (
+        "runtime owns the\nimmutable retained prefix"
+        in planner_calls[-1].messages[0]["content"]
+    )
+    assert "Return only the schema requested for the active mode" in repair_prompt
 
 
 def test_valid_planner_response_keeps_original_single_call_path(tmp_path: Path) -> None:

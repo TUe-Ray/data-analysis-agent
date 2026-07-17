@@ -44,11 +44,11 @@ Design attrition goals in the task's declared sequential order. A removal count 
 the number removed from the cohort remaining at that exact stage, so categories
 must be mutually exclusive. Never place a post-selection exclusion or its count in
 a goal that runs before the baseline/follow-up selection it depends on.
-When a task combines multiple studies, sites, or source systems with distinct
-identifier mappings, eligibility criteria, selection windows, or measurement
-rules, split cohort construction and attrition into one independently verifiable
-goal per rule system rather than one cross-system cohort goal. A later goal may
-combine those verified cohort results for shared statistics or final assembly.
+When a task combines multiple studies, sites, or source systems, a single
+cohort-producing goal may apply their distinct rules provided its normalized
+selected-pairs artifact keeps the systems separately auditable and carries their
+separate attrition and data-quality facts. Downstream statistics must use that
+approved artifact rather than rebuilding any cohort from raw files.
 When more than one downstream quantitative goal depends on a derived analysis
 cohort, add a producing goal that publishes the complete cohort as a declared
 tabular artifact with identifiers, arm/group, source selections, and derived
@@ -60,29 +60,35 @@ produce one complete answer object matching every required public-schema section
 intermediate goals must
 produce only facts or declared artifacts, never partial final-answer wrappers."""
 
-PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid scientific
-HighLevelPlan response. Return exactly one JSON object matching the required
-HighLevelPlan schema. Preserve the original scientific task, required coverage,
-and valid goals whenever possible. Use unique goal_id values. Each dependency
-must name an existing goal_id that appears earlier in the goals list. Do not
-calculate results or add implementation details, code, tools, or file paths. Do
-not remove required task outputs merely to make the structure valid. Express
-required outputs as JSON-compatible facts or declared analysis artifacts, never as
-in-memory DataFrames, Series, arrays, or other Python objects. When completed goal
-definitions are supplied, this is a scientific-replan repair: return the complete
-workflow, copy every retained completed goal definition unchanged, and retain the
-remaining goals. Only invalidate_from_goal_id may request bounded rollback. Do not
-return only the remaining goals
-or use a completed goal_id for a changed definition. Repair the supplied invalid
-response's structure; do not perform another scientific replan."""
+PLANNER_REPAIR_SYSTEM_PROMPT = """Repair one structurally invalid Planner response.
+Return exactly one JSON object matching the schema requested for the active mode.
+For initial planning, that schema is HighLevelPlan. For a scientific replan, it is
+SuffixReplan and contains only the replacement suffix: the runtime owns the
+immutable retained prefix. Use unique goal_id values and declare dependencies only
+through depends_on. Do not calculate results or add implementation details, code,
+tools, or file paths. Do not remove required task outputs merely to make the
+structure valid. Express required outputs as JSON-compatible facts or declared
+analysis artifacts, never as in-memory DataFrames, Series, arrays, or other Python
+objects. Repair only the supplied response's structure; do not perform another
+scientific replan."""
 
 EXECUTOR_SYSTEM_PROMPT = """You are the tactical Executor for one scientific goal.
 Choose a trusted built-in capability when it directly satisfies the goal; otherwise
-choose generated_python. Do not change the goal, remove outputs or constraints,
+choose generated_python. Choose structured_result for a compact document-only
+reconciliation goal that needs no raw-data computation or tabular artifact. Do not
+change the goal, remove outputs or constraints,
 judge scientific validity, or add unsupported conclusions. Return only one JSON
 ExecutionStrategy with strategy, capability_name, arguments, and a short
 concise_reason. Arguments must validate against the selected capability. For
-generated_python, capability_name must be null and arguments must be {}."""
+generated_python or structured_result, capability_name must be null and arguments
+must be {}."""
+
+STRUCTURED_RESULT_SYSTEM_PROMPT = """Return a compact JSON-compatible scientific
+result for the fixed document-reconciliation goal. Use only the supplied public
+documents, codebooks, precedence metadata, goal contract, and verified upstream
+facts. Do not write or execute Python, do not reopen Markdown at runtime, and do
+not publish artifacts. Return only the required StructuredResult JSON object with
+result and warnings."""
 
 PYTHON_GENERATION_SYSTEM_PROMPT = """Generate one deterministic Python script for
 the supplied fixed scientific goal. Return only the required PythonGeneration JSON
@@ -345,9 +351,10 @@ def build_planner_repair_messages(
     answer_schema: dict[str, JsonValue] | None = None,
     required_output_paths: list[str] | None = None,
     max_plan_goals: int = 6,
+    planner_mode: str = "initial",
 ) -> list[dict[str, str]]:
     """Build a compact structural-only repair request for Planner output."""
-    schema_summary = (
+    initial_schema_summary = (
         '{"scientific_objective":"string","goals":[{"goal_id":"string",'
         '"objective":"string","required_outputs":["string"],'
         '"constraints":["string"],"success_criteria":["string"],'
@@ -355,6 +362,15 @@ def build_planner_repair_messages(
         '"final_output_goal_id":"last_goal_id",'
         '"invalidate_from_goal_id":null}'
     )
+    suffix_schema_summary = (
+        '{"replace_from_goal_id":"unfinished_goal_id",'
+        '"replacement_goals":[{"goal_id":"string","objective":"string",'
+        '"required_outputs":["string"],"constraints":["string"],'
+        '"success_criteria":["string"],"depends_on":["earlier_goal_id"]}],'
+        '"final_output_goal_id":"last_goal_id","reason":"string"}'
+    )
+    is_replan = planner_mode == "scientific_replan"
+    schema_summary = suffix_schema_summary if is_replan else initial_schema_summary
     return [
         {"role": "system", "content": PLANNER_REPAIR_SYSTEM_PROMPT},
         {
@@ -364,16 +380,15 @@ def build_planner_repair_messages(
                 f"Invalid Planner response:\n{invalid_response}\n\n"
                 f"Deterministic validation error:\n{validation_error}\n\n"
                 + (
-                    "Previous full plan (reference for restoring immutable completed "
-                    "goals; do not replace the candidate with a residual plan):\n"
+                    "Immutable retained prefix summary; do not repeat or rewrite it "
+                    "in the suffix response:\n"
                     f"{json.dumps(previous_plan)}\n\n"
                     if previous_plan is not None
                     else ""
                 )
                 + (
-                    "Immutable completed goal definitions (copy every object below "
-                    "unchanged into the complete repaired plan, before dependent "
-                    "remaining goals):\n"
+                    "Immutable completed goal definitions are runtime-owned context; "
+                    "do not include them in the suffix:\n"
                     f"{json.dumps(completed_goal_definitions)}\n\n"
                     if completed_goal_definitions
                     else ""
@@ -390,7 +405,8 @@ def build_planner_repair_messages(
                     if approved_artifacts
                     else ""
                 )
-                + f"HighLevelPlan JSON schema summary:\n{schema_summary}\n\n"
+                + f"Active planner mode: {planner_mode}\n"
+                + f"Required JSON schema summary:\n{schema_summary}\n\n"
                 + f"Maximum goals: {max_plan_goals}\n\n"
                 + (
                     "Exact public answer schema:\n"
@@ -402,8 +418,7 @@ def build_planner_repair_messages(
                 )
                 + "Dependency rule: every depends_on item must exactly match an "
                 "existing earlier goal_id; forward and missing dependencies are "
-                "invalid. Return the complete repaired workflow, never only its "
-                "uncompleted suffix."
+                "invalid. Return only the schema requested for the active mode."
             ),
         },
     ]
@@ -425,6 +440,34 @@ def build_executor_strategy_repair_messages(
                 f"Validation error:\n{validation_error}"
             ),
         },
+    ]
+
+
+def build_structured_result_messages(
+    *,
+    current_goal: dict[str, JsonValue],
+    input_context: str,
+    completed_goal_results: list[dict[str, JsonValue]],
+    verification_feedback: str | None = None,
+    previous_attempt_result: dict[str, JsonValue] | None = None,
+) -> list[dict[str, str]]:
+    """Build a no-code prompt for compact document reasoning results."""
+    parts = [
+        f"Current IntermediateGoal:\n{json.dumps(current_goal)}",
+        f"Public specification context:\n{input_context}",
+        "Verified prerequisite GoalResults:\n"
+        + json.dumps(completed_goal_results, ensure_ascii=False),
+    ]
+    if verification_feedback:
+        parts.append(f"Exact verifier feedback:\n{verification_feedback}")
+    if previous_attempt_result is not None:
+        parts.append(
+            "Rejected previous result; retain sound facts and correct every issue:\n"
+            + json.dumps(previous_attempt_result, ensure_ascii=False)
+        )
+    return [
+        {"role": "system", "content": STRUCTURED_RESULT_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(parts)},
     ]
 
 

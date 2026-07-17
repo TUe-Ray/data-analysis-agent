@@ -686,7 +686,7 @@ def test_failed_agent_call_persists_failure_log(
     assert outcome.status == "error"
     workflow_log = (attempt / "agent_run/workflow.log").read_text(encoding="utf-8")
     assert "Exchange: 1" in workflow_log
-    assert "Purpose: planner" in workflow_log
+    assert "Purpose: high_level_plan" in workflow_log
     assert "No scripted planner response remains" in workflow_log
 
 
