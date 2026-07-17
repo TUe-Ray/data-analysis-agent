@@ -1,0 +1,4 @@
+event_id,source_subject_id,event_effective_date,event_type_code
+BX-08-PRE,BETA-009,2026-02-01,EXCLUDE
+BX-05-ON-FOLLOWUP,BETA-006,2026-04-05,EXCLUDE
+BX-11-BEFORE-FOLLOWUP,BETA-001,2026-04-02,EXCLUDE

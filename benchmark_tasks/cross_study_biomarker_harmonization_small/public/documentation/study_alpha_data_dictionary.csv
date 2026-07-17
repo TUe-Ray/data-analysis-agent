@@ -1,0 +1,7 @@
+file,physical_column,semantic_meaning,join_key_or_relation
+study_alpha_subjects.csv,source_subject_id,Alpha source subject ID,joins Alpha raw files
+study_alpha_subjects.csv,analysis_subject_id,canonical identifier,final output ID
+study_alpha_visits.csv,visit_record_id,scientific visit record ID,joins assays
+study_alpha_visits.csv,technical_row_id,technical row key,exclude from logical duplicate identity
+study_alpha_assays.csv,visit_record_id,visit relation,joins visits
+study_alpha_assays.csv,technical_row_id,technical row key,exclude from logical duplicate identity

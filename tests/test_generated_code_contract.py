@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from data_analysis_agent.nodes import _normalize_generated_comments
 from data_analysis_agent.python_runner import LocalPythonRunner
 from data_analysis_agent.schemas import PythonGeneration
 
@@ -54,6 +55,25 @@ def test_hash_inside_string_is_not_a_comment(tmp_path: Path) -> None:
 
     assert result.success
     assert result.result == {"label": "# not a comment"}
+
+
+def test_model_comment_normalization_preserves_executable_source(
+    tmp_path: Path,
+) -> None:
+    normalized = _normalize_generated_comments(
+        "value = 2  # ordinary model comment\n__agent_result__ = {'value': value}\n"
+    )
+
+    result = LocalPythonRunner().run(
+        code=normalized,
+        goal_directory=tmp_path / "goal",
+        allowed_files=[],
+        version=1,
+    )
+
+    assert "ordinary model comment" not in normalized
+    assert result.success
+    assert result.result == {"value": 2}
 
 
 @pytest.mark.parametrize(

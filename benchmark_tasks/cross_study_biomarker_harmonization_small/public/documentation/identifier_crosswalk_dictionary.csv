@@ -1,0 +1,2 @@
+file,source_column,target_column,rule
+study_beta_subject_crosswalk.csv,source_subject_id,analysis_subject_id,Many raw source IDs resemble another subject canonical ID; always use this explicit mapping.

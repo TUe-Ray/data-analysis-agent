@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -78,9 +80,23 @@ def grade_candidate(
         if spec is None or spec.loader is None:
             raise ImportError("could not create grader module specification")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        try:
+            # Private graders are executed repeatedly during live benchmarks.  Do
+            # not mutate a checked-in task package with interpreter cache files.
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
         grader: Callable[..., object] = module.grade
-        raw = grader(candidate, reference)
+        signature = inspect.signature(grader)
+        try:
+            signature.bind(candidate, reference)
+        except TypeError:
+            signature.bind(candidate)
+            raw = grader(candidate)
+        else:
+            raw = grader(candidate, reference)
         return raw if isinstance(raw, GradeResult) else GradeResult.model_validate(raw)
     except Exception as error:
         return GradeResult(

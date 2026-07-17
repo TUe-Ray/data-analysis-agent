@@ -258,6 +258,8 @@ def test_downstream_python_prompt_prevents_semantic_code_refilter_regression(
         verification_feedback=(
             "Use amended followup_target_day 35, not obsolete base day 38."
         ),
+        previous_attempt_result={"effective_specification": {"target_day": 38}},
+        previous_attempt_code="__agent_result__ = {'target_day': 38}",
     )
 
     system = " ".join(messages[0]["content"].split())
@@ -275,6 +277,11 @@ def test_downstream_python_prompt_prevents_semantic_code_refilter_regression(
     assert "source-system identifiers and canonical analysis identifiers distinct" in (
         system
     )
+    user = messages[1]["content"]
+    assert "Rejected result from the immediately preceding attempt" in user
+    assert "Previous source from that rejected attempt" in user
+    assert "__agent_result__ = {'target_day': 38}" in user
+    assert '"target_day": 38' in user
     assert "never join a source identifier directly to a canonical patient" in system
     assert "Do not rely on whitespace-sensitive" in system
     assert "Use amended followup_target_day 35" in messages[1]["content"]
@@ -376,6 +383,59 @@ def test_obsolete_base_window_routes_to_replan_against_verified_contract() -> No
     assert '"followup_window_start_day": 28' in prompt
     assert "obsolete base day 21 through day 35" in prompt
     assert "Where this amendment conflicts" not in prompt
+
+
+def test_dependency_free_result_error_routes_to_goal_retry() -> None:
+    plan = _plan()
+    state = {
+        "question": "Reconcile the governing protocol.",
+        "structured_plan": True,
+        "high_level_plan": plan,
+        "plan": json.dumps(plan),
+        "current_goal": plan["goals"][0],
+        "current_goal_index": 0,
+        "current_goal_result": {
+            "goal_id": "rules",
+            "success": True,
+            "strategy": "generated_python",
+            "capability_name": None,
+            "result": {
+                "effective_specification": {"window": [21, 35]},
+                "field_mappings": {"arm": {"A": "A"}},
+                "document_precedence": ["base protocol"],
+            },
+            "warnings": [],
+            "error": None,
+            "artifact_paths": [],
+        },
+        "execution_result": "{}",
+        "current_strategy": {
+            "strategy": "generated_python",
+            "capability_name": None,
+            "arguments": {},
+            "concise_reason": "Reconcile rules.",
+        },
+        "completed_goal_results": [],
+        "input_profile": {"specification_documents": [], "csv_profiles": []},
+        "input_context": "",
+        "replan_count": 0,
+        "max_replans": 1,
+        "max_goal_retries": 2,
+        "trace": [],
+    }
+    model = ScriptedRoleModel(
+        {
+            "verifier": [
+                '{"decision":"REPLAN","issue_classification":"result",'
+                '"feedback":"The arm mapping is incorrect."}'
+            ]
+        }
+    )
+
+    update = make_verifier_node(model)(state)
+
+    assert update["verification_decision"] == "RETRY_GOAL"
+    assert "dependency-free goal locally" in update["verification_feedback"]
 
 
 def test_verifier_does_not_replan_for_json_trailing_zero_representation() -> None:

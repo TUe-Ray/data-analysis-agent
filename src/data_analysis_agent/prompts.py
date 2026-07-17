@@ -44,6 +44,16 @@ Design attrition goals in the task's declared sequential order. A removal count 
 the number removed from the cohort remaining at that exact stage, so categories
 must be mutually exclusive. Never place a post-selection exclusion or its count in
 a goal that runs before the baseline/follow-up selection it depends on.
+When a task combines multiple studies, sites, or source systems with distinct
+identifier mappings, eligibility criteria, selection windows, or measurement
+rules, split cohort construction and attrition into one independently verifiable
+goal per rule system rather than one cross-system cohort goal. A later goal may
+combine those verified cohort results for shared statistics or final assembly.
+When more than one downstream quantitative goal depends on a derived analysis
+cohort, add a producing goal that publishes the complete cohort as a declared
+tabular artifact with identifiers, arm/group, source selections, and derived
+values. Each consumer must depend on that producer and use the approved artifact
+as its sole cohort source; do not independently rebuild the cohort from raw files.
 When a public answer schema is supplied, set final_output_goal_id to the last goal.
 That final assembly goal's dependency closure must include every earlier goal and
 produce one complete answer object matching every required public-schema section;
@@ -109,6 +119,10 @@ a downstream goal unless the current goal explicitly requires that audit; doing 
 with semantic labels where physical codes are stored can silently remove valid
 rows. When exact logical duplicate fields are supplied, exclude technical row keys
 from that identity and deduplicate on exactly the declared scientific fields.
+When a declared prerequisite artifact contains the derived cohort required for the
+goal, use that artifact as the only cohort source. Do not reconstruct the cohort
+from raw staged files or combine rows from separately recomputed versions; this
+would make downstream attrition, pair listings, and statistics incompatible.
 Never call drop_duplicates without the explicit scientific identity subset when
 the specification distinguishes logical duplicates from technical rows. Preserve
 the specification's declared stage order: when logical deduplication precedes
@@ -171,7 +185,10 @@ contract limit, never truncate, slice, sample, call head, or discard rows to fit
 the limit. Write the complete table as a declared artifact and return only its
 compact manifest, counts, and other required scalar facts. Never put summary text,
 JSON framing, Markdown
-fences, or explanation inside code_lines."""
+fences, or explanation inside code_lines. Do not repair a failed Markdown regular
+expression by making the phrase still more specific or by dereferencing another
+unguarded match. Parse headings and fields tolerantly, or derive the compact rule
+from the supplied factual context, and always handle an absent optional match."""
 
 PYTHON_RESULT_SKELETON = """Minimal accepted pattern (replace paths and fields as
 needed):
@@ -461,6 +478,8 @@ def build_python_generation_messages(
     approved_artifacts: list[dict[str, object]] | None = None,
     result_schema: dict[str, JsonValue] | None = None,
     verification_feedback: str | None = None,
+    previous_attempt_result: dict[str, JsonValue] | None = None,
+    previous_attempt_code: str | None = None,
 ) -> list[dict[str, str]]:
     """Supply generated-code creation only the current factual execution context."""
     return [
@@ -475,10 +494,28 @@ def build_python_generation_messages(
                 f"Staged input schema and factual context:\n{input_context}\n\n"
                 + (
                     "Verifier correction from the preceding scientific replan; "
-                    "the regenerated implementation must address it without "
-                    "changing the approved goal:\n"
+                    "the regenerated implementation must preserve correct prior "
+                    "facts and make every requested correction without changing "
+                    "the approved goal:\n"
                     f"{verification_feedback}\n\n"
                     if verification_feedback
+                    else ""
+                )
+                + (
+                    "Rejected result from the immediately preceding attempt. "
+                    "Use it only as a concrete edit target; do not treat it as "
+                    "approved evidence, and correct every verifier issue:\n"
+                    f"{json.dumps(previous_attempt_result, ensure_ascii=False)}\n\n"
+                    if previous_attempt_result is not None
+                    else ""
+                )
+                + (
+                    "Previous source from that rejected attempt. Regenerate this "
+                    "complete script as a focused correction: retain sound work, "
+                    "make every verifier-requested correction, and do not replace "
+                    "it with a less complete analysis:\n"
+                    f"{previous_attempt_code}\n\n"
+                    if previous_attempt_code is not None
                     else ""
                 )
                 + "If dependency_goal_results.json is listed, it is the only "

@@ -5,9 +5,13 @@ from __future__ import annotations
 import ast
 import csv
 import hashlib
+import io
 import json
+import math
 import mimetypes
 import re
+import statistics
+import tokenize
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -1464,6 +1468,22 @@ def _materially_changed(previous: str, current: str) -> bool:
     return _canonical_source(previous) != _canonical_source(current)
 
 
+def _normalize_generated_comments(code: str) -> str:
+    """Remove presentation-only Python comments before strict runner validation.
+
+    The generated-code contract remains strict for direct callers, but model
+    responses occasionally add ordinary comments despite the generation prompt.
+    Dropping COMMENT tokens is semantics-preserving and still leaves a malformed
+    result assignment (for example one swallowed by a trailing comment) invalid.
+    """
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(code).readline)
+        without_comments = [token for token in tokens if token.type != tokenize.COMMENT]
+        return tokenize.untokenize(without_comments)
+    except tokenize.TokenError:
+        return code
+
+
 def _next_python_version(state: AgentState) -> int:
     return len(state.get("python_response_history", [])) + 1
 
@@ -1532,6 +1552,11 @@ def _python_contract_response(
             history,
             [str(raw_path), str(validation_path)],
             validation_error,
+        )
+    normalized_source = _normalize_generated_comments(contract.source())
+    if normalized_source != contract.source():
+        contract = contract.model_copy(
+            update={"code_lines": normalized_source.splitlines()}
         )
     metadata_path = goal_directory / f"{artifact_prefix}_v{version}.json"
     metadata_path.write_text(contract.model_dump_json(indent=2), encoding="utf-8")
@@ -1966,6 +1991,27 @@ def make_executor_node(
         else:
             goal = IntermediateGoal.model_validate(state["current_goal"])
             goal_directory = Path(state["run_directory"]) / "goals" / goal.goal_id
+            previous_attempt_result: dict[str, object] | None = None
+            previous_attempt_code: str | None = None
+            if state.get("verification_decision") in {"REPLAN", "RETRY_GOAL"}:
+                previous_goal_result = state.get("current_goal_result")
+                if isinstance(previous_goal_result, dict):
+                    previous_result = previous_goal_result.get("result")
+                    if isinstance(previous_result, dict):
+                        previous_attempt_result = previous_result
+                    artifact_paths = previous_goal_result.get("artifact_paths")
+                    if isinstance(artifact_paths, list):
+                        for raw_path in reversed(artifact_paths):
+                            if not isinstance(raw_path, str):
+                                continue
+                            path = Path(raw_path)
+                            if not path.name.startswith("generated_code_v"):
+                                continue
+                            try:
+                                previous_attempt_code = path.read_text(encoding="utf-8")
+                            except OSError:
+                                pass
+                            break
             source_messages = build_python_generation_messages(
                 current_goal=goal.model_dump(mode="json"),
                 staged_file_paths=[str(path) for path in _allowed_paths(state)],
@@ -1983,6 +2029,8 @@ def make_executor_node(
                     if state.get("verification_decision") in {"REPLAN", "RETRY_GOAL"}
                     else None
                 ),
+                previous_attempt_result=previous_attempt_result,
+                previous_attempt_code=previous_attempt_code,
             )
             contract, version, response_history, artifacts, contract_error = (
                 _python_contract_response(
@@ -2261,6 +2309,281 @@ def _attrition_consistency_error(result: dict[str, object]) -> str | None:
     return None
 
 
+def _finite_number(value: object) -> float | None:
+    """Return a finite JSON number, excluding booleans."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _numbers_match(left: object, right: object, *, tolerance: float = 0.0015) -> bool:
+    """Compare rounded scientific outputs without accepting a material mismatch."""
+    left_number = _finite_number(left)
+    right_number = _finite_number(right)
+    return (
+        left_number is not None
+        and right_number is not None
+        and abs(left_number - right_number) <= tolerance
+    )
+
+
+def _cross_study_consistency_error(result: dict[str, object]) -> str | None:
+    """Check identities in a conventional multi-study result from its own values.
+
+    This intentionally uses neither task inputs nor expected values.  It applies only
+    when a result exposes the common ``study_*`` sections, and prevents a final
+    assembly from combining selected pairs, attrition, statistics, and comparisons
+    produced by incompatible earlier calculations.
+    """
+    payload = result.get("key_results")
+    if not isinstance(payload, dict):
+        payload = result
+    section_names = {
+        "selected_pairs",
+        "study_attrition",
+        "study_statistics",
+        "study_between_arm_comparisons",
+        "pooled_comparison",
+    }
+    if not any(name in payload for name in section_names):
+        return None
+
+    raw_pairs = payload.get("selected_pairs")
+    pairs = raw_pairs if isinstance(raw_pairs, list) else None
+    attrition = payload.get("study_attrition")
+    statistics_by_study = payload.get("study_statistics")
+    comparisons = payload.get("study_between_arm_comparisons")
+    pooled = payload.get("pooled_comparison")
+
+    pair_values: dict[str, dict[str, list[dict[str, object]]]] = {}
+    if pairs is not None:
+        for index, pair in enumerate(pairs):
+            if not isinstance(pair, dict):
+                return (
+                    "Cross-study result is inconsistent: "
+                    f"selected_pairs[{index}] is not an object."
+                )
+            study = pair.get("study_id")
+            arm = pair.get("arm")
+            if not isinstance(study, str) or not isinstance(arm, str):
+                return (
+                    "Cross-study result is inconsistent: every selected pair must "
+                    "identify both study_id and arm."
+                )
+            pair_values.setdefault(study, {}).setdefault(arm, []).append(pair)
+
+    if isinstance(attrition, dict):
+        for study, raw_counts in attrition.items():
+            if not isinstance(study, str) or not isinstance(raw_counts, dict):
+                continue
+            total_key = next(
+                (
+                    key
+                    for key in ("total_subjects", "total_patients")
+                    if key in raw_counts
+                ),
+                None,
+            )
+            post_key = next(
+                (
+                    key
+                    for key in (
+                        "excluded_post_start_before_followup",
+                        "excluded_post_start_before_or_on_followup",
+                    )
+                    if key in raw_counts
+                ),
+                None,
+            )
+            required = (
+                total_key,
+                "basic_ineligible",
+                "eligible_after_basic_checks",
+                "excluded_pre_start",
+                "no_valid_baseline",
+                "no_valid_followup",
+                post_key,
+                "complete_pairs",
+                "complete_pairs_arm_a",
+                "complete_pairs_arm_b",
+            )
+            if any(
+                key is None or not isinstance(raw_counts.get(key), int)
+                for key in required
+            ):
+                continue
+            counts = {str(key): int(raw_counts[str(key)]) for key in required}
+            if any(value < 0 for value in counts.values()):
+                return (
+                    f"Cross-study attrition is inconsistent for {study}: "
+                    "counts must be nonnegative."
+                )
+            if (
+                counts["eligible_after_basic_checks"]
+                != counts[str(total_key)] - counts["basic_ineligible"]
+            ):
+                return (
+                    f"Cross-study attrition is inconsistent for {study}: "
+                    "eligible_after_basic_checks must equal total minus "
+                    "basic_ineligible."
+                )
+            removals = sum(
+                counts[key]
+                for key in (
+                    "excluded_pre_start",
+                    "no_valid_baseline",
+                    "no_valid_followup",
+                    str(post_key),
+                    "complete_pairs",
+                )
+            )
+            if removals != counts["eligible_after_basic_checks"]:
+                return (
+                    f"Cross-study attrition is inconsistent for {study}: sequential "
+                    "removals plus complete_pairs must equal "
+                    "eligible_after_basic_checks."
+                )
+            if (
+                counts["complete_pairs_arm_a"] + counts["complete_pairs_arm_b"]
+                != counts["complete_pairs"]
+            ):
+                return (
+                    f"Cross-study attrition is inconsistent for {study}: complete-pair "
+                    "arm counts must sum to complete_pairs."
+                )
+            if pairs is not None:
+                grouped = pair_values.get(study, {})
+                if (
+                    len(grouped.get("A", [])) != counts["complete_pairs_arm_a"]
+                    or len(grouped.get("B", [])) != counts["complete_pairs_arm_b"]
+                ):
+                    return (
+                        f"Cross-study result is inconsistent for {study}: "
+                        "selected_pairs "
+                        "arm counts do not match reported attrition."
+                    )
+
+    derived_statistics: dict[str, dict[str, dict[str, float]]] = {}
+    if pairs is not None and isinstance(statistics_by_study, dict):
+        for study, arms in statistics_by_study.items():
+            if not isinstance(study, str) or not isinstance(arms, dict):
+                continue
+            for arm, reported in arms.items():
+                values = pair_values.get(study, {}).get(str(arm), [])
+                if not isinstance(reported, dict) or not values:
+                    continue
+                baselines = [
+                    _finite_number(pair.get("baseline_harmonized_value"))
+                    for pair in values
+                ]
+                followups = [
+                    _finite_number(pair.get("followup_harmonized_value"))
+                    for pair in values
+                ]
+                changes = [_finite_number(pair.get("change")) for pair in values]
+                if any(value is None for value in [*baselines, *followups, *changes]):
+                    continue
+                baseline_values = [
+                    float(value) for value in baselines if value is not None
+                ]
+                followup_values = [
+                    float(value) for value in followups if value is not None
+                ]
+                change_values = [float(value) for value in changes if value is not None]
+                if any(
+                    not _numbers_match(followup - baseline, change)
+                    for baseline, followup, change in zip(
+                        baseline_values, followup_values, change_values, strict=True
+                    )
+                ):
+                    return (
+                        f"Cross-study result is inconsistent for {study}/{arm}: "
+                        "change must equal follow-up minus baseline."
+                    )
+                expected = {
+                    "n": len(values),
+                    "mean_baseline": statistics.mean(baseline_values),
+                    "mean_followup": statistics.mean(followup_values),
+                    "mean_change": statistics.mean(change_values),
+                    "sample_sd_change": statistics.stdev(change_values)
+                    if len(change_values) > 1
+                    else 0.0,
+                }
+                expected["sample_se_change"] = expected["sample_sd_change"] / math.sqrt(
+                    expected["n"]
+                )
+                mismatches = [
+                    key
+                    for key, value in expected.items()
+                    if not _numbers_match(reported.get(key), value)
+                ]
+                if mismatches:
+                    return (
+                        f"Cross-study result is inconsistent for {study}/{arm}: "
+                        "reported statistics do not match selected_pairs ("
+                        + ", ".join(mismatches)
+                        + ")."
+                    )
+                derived_statistics.setdefault(study, {})[str(arm)] = expected
+
+    derived_comparisons: dict[str, tuple[float, float, float]] = {}
+    if isinstance(comparisons, dict):
+        for study, reported in comparisons.items():
+            arm_statistics = derived_statistics.get(str(study), {})
+            if not isinstance(reported, dict) or not {"A", "B"}.issubset(
+                arm_statistics
+            ):
+                continue
+            arm_a, arm_b = arm_statistics["A"], arm_statistics["B"]
+            difference = arm_b["mean_change"] - arm_a["mean_change"]
+            variance = (
+                arm_a["sample_sd_change"] ** 2 / arm_a["n"]
+                + arm_b["sample_sd_change"] ** 2 / arm_b["n"]
+            )
+            weight = 1 / variance if variance else 0.0
+            expected = {
+                "difference_in_mean_change_b_minus_a": difference,
+                "variance_of_difference": variance,
+                "inverse_variance_weight": weight,
+            }
+            mismatches = [
+                key
+                for key, value in expected.items()
+                if not _numbers_match(reported.get(key), value)
+            ]
+            if mismatches:
+                return (
+                    f"Cross-study result is inconsistent for {study}: comparison does "
+                    "not match reported arm statistics (" + ", ".join(mismatches) + ")."
+                )
+            derived_comparisons[str(study)] = (difference, variance, weight)
+
+    if isinstance(pooled, dict) and derived_comparisons:
+        total_weight = sum(values[2] for values in derived_comparisons.values())
+        pooled_difference = (
+            sum(values[0] * values[2] for values in derived_comparisons.values())
+            / total_weight
+            if total_weight
+            else 0.0
+        )
+        expected = {
+            "sum_of_inverse_variance_weights": total_weight,
+            "pooled_difference_in_mean_change_b_minus_a": pooled_difference,
+        }
+        mismatches = [
+            key
+            for key, value in expected.items()
+            if not _numbers_match(pooled.get(key), value)
+        ]
+        if mismatches:
+            return (
+                "Cross-study result is inconsistent: pooled comparison does not match "
+                "the study comparisons (" + ", ".join(mismatches) + ")."
+            )
+    return None
+
+
 def _upstream_attrition_conflict_error(
     state: AgentState, result: dict[str, object]
 ) -> str | None:
@@ -2524,6 +2847,7 @@ def make_verifier_node(model: RoleModel) -> Node:
                         state, current.result
                     )
                     attrition_error = _attrition_consistency_error(current.result)
+                    cross_study_error = _cross_study_consistency_error(current.result)
                     upstream_attrition_error = _upstream_attrition_conflict_error(
                         state, current.result
                     )
@@ -2541,6 +2865,12 @@ def make_verifier_node(model: RoleModel) -> Node:
                             decision="RETRY_GOAL",
                             issue_classification="result",
                             feedback=attrition_error,
+                        )
+                    if cross_study_error:
+                        output = VerificationOutput(
+                            decision="RETRY_GOAL",
+                            issue_classification="result",
+                            feedback=cross_study_error,
                         )
                     if upstream_attrition_error:
                         output = VerificationOutput(
@@ -2566,6 +2896,21 @@ def make_verifier_node(model: RoleModel) -> Node:
                         feedback=(
                             "Execution failed and did not produce a result that can "
                             "satisfy the current goal."
+                        ),
+                    )
+                if (
+                    structured
+                    and output.decision == "REPLAN"
+                    and not state["current_goal"].get("depends_on")
+                    and output.issue_classification
+                    in {"result", "evidence", "implementation"}
+                ):
+                    output = VerificationOutput(
+                        decision="RETRY_GOAL",
+                        issue_classification="result",
+                        feedback=(
+                            "Correct the current dependency-free goal locally; "
+                            "a plan replacement is not needed. " + output.feedback
                         ),
                     )
                 plan = HighLevelPlan.model_validate(state["high_level_plan"])

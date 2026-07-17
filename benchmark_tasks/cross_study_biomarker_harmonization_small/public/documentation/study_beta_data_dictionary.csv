@@ -1,0 +1,7 @@
+file,physical_column,semantic_meaning,join_key_or_relation
+study_beta_subjects.csv,analysis_subject_id,canonical identifier,crosswalk target and final output ID
+study_beta_subject_crosswalk.csv,source_subject_id,source identifier,joins Beta raw files
+study_beta_subject_crosswalk.csv,analysis_subject_id,canonical identifier,joins subjects
+study_beta_visits.csv,visit_record_id,scientific visit record ID,joins assays
+study_beta_visits.csv,technical_row_id,technical row key,exclude from logical duplicate identity
+study_beta_assays.csv,technical_row_id,technical row key,exclude from logical duplicate identity

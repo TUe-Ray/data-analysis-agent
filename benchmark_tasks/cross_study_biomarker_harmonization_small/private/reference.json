@@ -1,0 +1,323 @@
+{
+  "status": "completed",
+  "answer": "Study-specific biomarker responses were harmonized and summarized using the governing protocols and fixed-effect inverse-variance pooling.",
+  "key_results": {
+    "study_attrition": {
+      "alpha": {
+        "total_subjects": 11,
+        "basic_ineligible": 1,
+        "eligible_after_basic_checks": 10,
+        "excluded_pre_start": 1,
+        "no_valid_baseline": 1,
+        "no_valid_followup": 1,
+        "excluded_post_start_before_followup": 1,
+        "complete_pairs": 6,
+        "complete_pairs_arm_a": 3,
+        "complete_pairs_arm_b": 3
+      },
+      "beta": {
+        "total_subjects": 11,
+        "basic_ineligible": 1,
+        "eligible_after_basic_checks": 10,
+        "excluded_pre_start": 1,
+        "no_valid_baseline": 1,
+        "no_valid_followup": 1,
+        "excluded_post_start_before_followup": 1,
+        "complete_pairs": 6,
+        "complete_pairs_arm_a": 3,
+        "complete_pairs_arm_b": 3
+      }
+    },
+    "study_statistics": {
+      "alpha": {
+        "A": {
+          "n": 3,
+          "mean_baseline": 110.0,
+          "mean_followup": 101.0,
+          "mean_change": -9.0,
+          "sample_sd_change": 1.0,
+          "sample_se_change": 0.577
+        },
+        "B": {
+          "n": 3,
+          "mean_baseline": 140.0,
+          "mean_followup": 126.0,
+          "mean_change": -14.0,
+          "sample_sd_change": 1.0,
+          "sample_se_change": 0.577
+        }
+      },
+      "beta": {
+        "A": {
+          "n": 3,
+          "mean_baseline": 105.0,
+          "mean_followup": 99.0,
+          "mean_change": -6.0,
+          "sample_sd_change": 2.0,
+          "sample_se_change": 1.155
+        },
+        "B": {
+          "n": 3,
+          "mean_baseline": 135.0,
+          "mean_followup": 126.0,
+          "mean_change": -9.0,
+          "sample_sd_change": 2.0,
+          "sample_se_change": 1.155
+        }
+      }
+    },
+    "study_between_arm_comparisons": {
+      "alpha": {
+        "difference_in_mean_change_b_minus_a": -5.0,
+        "variance_of_difference": 0.667,
+        "inverse_variance_weight": 1.5
+      },
+      "beta": {
+        "difference_in_mean_change_b_minus_a": -3.0,
+        "variance_of_difference": 2.667,
+        "inverse_variance_weight": 0.375
+      }
+    },
+    "pooled_comparison": {
+      "pooled_difference_in_mean_change_b_minus_a": -4.6,
+      "sum_of_inverse_variance_weights": 1.875
+    },
+    "selected_pairs": [
+      {
+        "study_id": "alpha",
+        "analysis_subject_id": "ALPHA-001",
+        "arm": "A",
+        "baseline_visit_record_id": "A01-BL",
+        "followup_visit_record_id": "A01-FU",
+        "baseline_assay_record_ids": [
+          "A01-ASSAY-BL"
+        ],
+        "followup_assay_record_ids": [
+          "A01-ASSAY-FU"
+        ],
+        "baseline_harmonized_value": 100.0,
+        "followup_harmonized_value": 92.0,
+        "change": -8.0
+      },
+      {
+        "study_id": "alpha",
+        "analysis_subject_id": "ALPHA-002",
+        "arm": "A",
+        "baseline_visit_record_id": "A02-BL",
+        "followup_visit_record_id": "A02-FU-AMENDED",
+        "baseline_assay_record_ids": [
+          "A02-ASSAY-BL"
+        ],
+        "followup_assay_record_ids": [
+          "A02-ASSAY-FU-AMENDED"
+        ],
+        "baseline_harmonized_value": 110.0,
+        "followup_harmonized_value": 100.0,
+        "change": -10.0
+      },
+      {
+        "study_id": "alpha",
+        "analysis_subject_id": "ALPHA-003",
+        "arm": "A",
+        "baseline_visit_record_id": "A03-BL-M8",
+        "followup_visit_record_id": "A03-FU",
+        "baseline_assay_record_ids": [
+          "A03-ASSAY-BL"
+        ],
+        "followup_assay_record_ids": [
+          "A03-ASSAY-FU"
+        ],
+        "baseline_harmonized_value": 120.0,
+        "followup_harmonized_value": 111.0,
+        "change": -9.0
+      },
+      {
+        "study_id": "alpha",
+        "analysis_subject_id": "ALPHA-004",
+        "arm": "B",
+        "baseline_visit_record_id": "A04-BL",
+        "followup_visit_record_id": "A04-FU",
+        "baseline_assay_record_ids": [
+          "A04-ASSAY-BL-VALID"
+        ],
+        "followup_assay_record_ids": [
+          "A04-ASSAY-FU"
+        ],
+        "baseline_harmonized_value": 130.0,
+        "followup_harmonized_value": 116.0,
+        "change": -14.0
+      },
+      {
+        "study_id": "alpha",
+        "analysis_subject_id": "ALPHA-005",
+        "arm": "B",
+        "baseline_visit_record_id": "A05-BL",
+        "followup_visit_record_id": "A05-FU",
+        "baseline_assay_record_ids": [
+          "A05-ASSAY-BL"
+        ],
+        "followup_assay_record_ids": [
+          "A05-ASSAY-FU"
+        ],
+        "baseline_harmonized_value": 140.0,
+        "followup_harmonized_value": 125.0,
+        "change": -15.0
+      },
+      {
+        "study_id": "alpha",
+        "analysis_subject_id": "ALPHA-006",
+        "arm": "B",
+        "baseline_visit_record_id": "A06-BL",
+        "followup_visit_record_id": "A06-FU-D34",
+        "baseline_assay_record_ids": [
+          "A06-ASSAY-BL"
+        ],
+        "followup_assay_record_ids": [
+          "A06-ASSAY-FU-D34"
+        ],
+        "baseline_harmonized_value": 150.0,
+        "followup_harmonized_value": 137.0,
+        "change": -13.0
+      },
+      {
+        "study_id": "beta",
+        "analysis_subject_id": "BETA-001",
+        "arm": "A",
+        "baseline_visit_record_id": "B01-BL",
+        "followup_visit_record_id": "B01-FU",
+        "baseline_assay_record_ids": [
+          "B01-ASSAY-BL-R1",
+          "B01-ASSAY-BL-R2",
+          "B01-ASSAY-BL-R3"
+        ],
+        "followup_assay_record_ids": [
+          "B01-ASSAY-FU-R1",
+          "B01-ASSAY-FU-R2",
+          "B01-ASSAY-FU-R3"
+        ],
+        "baseline_harmonized_value": 95.0,
+        "followup_harmonized_value": 91.0,
+        "change": -4.0
+      },
+      {
+        "study_id": "beta",
+        "analysis_subject_id": "BETA-002",
+        "arm": "A",
+        "baseline_visit_record_id": "B02-BL",
+        "followup_visit_record_id": "B02-FU",
+        "baseline_assay_record_ids": [
+          "B02-ASSAY-BL-R1",
+          "B02-ASSAY-BL-R2",
+          "B02-ASSAY-BL-R3"
+        ],
+        "followup_assay_record_ids": [
+          "B02-ASSAY-FU-R1",
+          "B02-ASSAY-FU-R2",
+          "B02-ASSAY-FU-R3"
+        ],
+        "baseline_harmonized_value": 105.0,
+        "followup_harmonized_value": 99.0,
+        "change": -6.0
+      },
+      {
+        "study_id": "beta",
+        "analysis_subject_id": "BETA-003",
+        "arm": "A",
+        "baseline_visit_record_id": "B03-BL-LOWER-BOUND",
+        "followup_visit_record_id": "B03-FU-UPPER-BOUND",
+        "baseline_assay_record_ids": [
+          "B03-ASSAY-BL-R1",
+          "B03-ASSAY-BL-R2",
+          "B03-ASSAY-BL-R3"
+        ],
+        "followup_assay_record_ids": [
+          "B03-ASSAY-FU-R1",
+          "B03-ASSAY-FU-R2",
+          "B03-ASSAY-FU-R3"
+        ],
+        "baseline_harmonized_value": 115.0,
+        "followup_harmonized_value": 107.0,
+        "change": -8.0
+      },
+      {
+        "study_id": "beta",
+        "analysis_subject_id": "BETA-004",
+        "arm": "B",
+        "baseline_visit_record_id": "B04-BL",
+        "followup_visit_record_id": "B04-FU",
+        "baseline_assay_record_ids": [
+          "B04-ASSAY-BL-R1",
+          "B04-ASSAY-BL-R2",
+          "B04-ASSAY-BL-R3"
+        ],
+        "followup_assay_record_ids": [
+          "B04-ASSAY-FU-R1",
+          "B04-ASSAY-FU-R2",
+          "B04-ASSAY-FU-R3"
+        ],
+        "baseline_harmonized_value": 125.0,
+        "followup_harmonized_value": 118.0,
+        "change": -7.0
+      },
+      {
+        "study_id": "beta",
+        "analysis_subject_id": "BETA-005",
+        "arm": "B",
+        "baseline_visit_record_id": "B05-BL",
+        "followup_visit_record_id": "B05-FU",
+        "baseline_assay_record_ids": [
+          "B05-ASSAY-BL-R1",
+          "B05-ASSAY-BL-R2",
+          "B05-ASSAY-BL-R3"
+        ],
+        "followup_assay_record_ids": [
+          "B05-ASSAY-FU-R1",
+          "B05-ASSAY-FU-R2",
+          "B05-ASSAY-FU-R3"
+        ],
+        "baseline_harmonized_value": 135.0,
+        "followup_harmonized_value": 126.0,
+        "change": -9.0
+      },
+      {
+        "study_id": "beta",
+        "analysis_subject_id": "BETA-006",
+        "arm": "B",
+        "baseline_visit_record_id": "B06-BL-M8",
+        "followup_visit_record_id": "B06-FU",
+        "baseline_assay_record_ids": [
+          "B06-ASSAY-BL-M8-R1",
+          "B06-ASSAY-BL-M8-R2",
+          "B06-ASSAY-BL-M8-R3"
+        ],
+        "followup_assay_record_ids": [
+          "B06-ASSAY-FU-R1",
+          "B06-ASSAY-FU-R2",
+          "B06-ASSAY-FU-R3"
+        ],
+        "baseline_harmonized_value": 145.0,
+        "followup_harmonized_value": 134.0,
+        "change": -11.0
+      }
+    ],
+    "data_quality_audit": {
+      "alpha": {
+        "scientific_duplicate_visit_rows_removed": 1,
+        "invalid_visit_rows_excluded": 1,
+        "scientific_duplicate_assay_rows_removed": 1,
+        "invalid_assay_rows_excluded": 3,
+        "insufficient_replicate_visit_summaries": 0
+      },
+      "beta": {
+        "scientific_duplicate_visit_rows_removed": 1,
+        "invalid_visit_rows_excluded": 1,
+        "scientific_duplicate_assay_rows_removed": 1,
+        "invalid_assay_rows_excluded": 3,
+        "insufficient_replicate_visit_summaries": 2
+      }
+    }
+  },
+  "limitations": [
+    "Descriptive analysis only; no causal or hypothesis-testing claims are made."
+  ]
+}

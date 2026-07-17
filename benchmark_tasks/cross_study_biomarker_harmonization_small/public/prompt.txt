@@ -1,0 +1,7 @@
+
+Analyze and harmonize the two longitudinal biomarker studies using every public
+protocol, amendment, harmonization, dictionary, codebook, crosswalk, and raw-data
+file. Respect document precedence and study-specific rules. Construct the eligible
+paired cohort, produce complete audit records, compute study-specific summaries and
+the protocol-defined pooled comparison, and return exactly one JSON object matching
+the public answer schema. Do not make causal claims or perform hypothesis tests.

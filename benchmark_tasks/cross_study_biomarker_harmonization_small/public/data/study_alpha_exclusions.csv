@@ -1,0 +1,3 @@
+event_id,source_subject_id,event_effective_date,event_type_code
+AX-08-PRE,AS08,2026-01-15,EXC
+AX-11-POST-BOUNDARY,AS11,2026-02-19,EXC

@@ -1,0 +1,16 @@
+study,field,physical_value,semantic_meaning,analysis_use
+alpha,arm_code,TA,Analysis arm A,accepted
+alpha,arm_code,TB,Analysis arm B,accepted
+alpha,consent_code,Y,Consented,accepted
+alpha,visit_status_code,V,Valid,accepted
+alpha,visit_status_code,R,Reviewed,accepted by amendment
+alpha,visit_status_code,X,Rejected,not accepted
+alpha,assay_status_code,Q,QC accepted,accepted
+alpha,assay_status_code,F,QC failed,not accepted
+beta,blind_arm_code,BA,Analysis arm A,accepted
+beta,blind_arm_code,BB,Analysis arm B,accepted
+beta,consent_flag,1,Consented,accepted
+beta,visit_status_code,OK,Accepted visit,accepted
+beta,visit_status_code,BAD,Rejected visit,not accepted
+beta,assay_status_code,PASS,Accepted replicate,accepted
+beta,assay_status_code,FAIL,Rejected replicate,not accepted
