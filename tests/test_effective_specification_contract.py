@@ -435,7 +435,7 @@ def test_dependency_free_result_error_routes_to_goal_retry() -> None:
     update = make_verifier_node(model)(state)
 
     assert update["verification_decision"] == "RETRY_GOAL"
-    assert "dependency-free goal locally" in update["verification_feedback"]
+    assert update["verification_feedback"] == "The arm mapping is incorrect."
 
 
 def test_verifier_does_not_replan_for_json_trailing_zero_representation() -> None:

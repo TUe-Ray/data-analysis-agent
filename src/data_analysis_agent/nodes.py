@@ -2875,6 +2875,34 @@ def _reconciliation_contract_error(
     return None
 
 
+def _normalize_verification_decision(
+    state: AgentState, output: VerificationOutput
+) -> VerificationOutput:
+    """Keep routing aligned with whether the current goal or plan must change."""
+    local_classes = {"implementation", "result", "evidence"}
+    contract_classes = {"plan_contract", "dependency_contract"}
+    decision = output.decision
+    classification = output.issue_classification
+    if decision == "REPLAN" and classification in local_classes:
+        return output.model_copy(
+            update={"decision": "RETRY_GOAL", "issue_classification": "result"}
+        )
+    if classification == "artifact_handoff":
+        if state.get("pending_goal_artifacts"):
+            return output.model_copy(
+                update={
+                    "decision": "RETRY_GOAL",
+                    "issue_classification": "artifact_handoff",
+                }
+            )
+        return output.model_copy(
+            update={"decision": "REPLAN", "issue_classification": "dependency_contract"}
+        )
+    if decision == "RETRY_GOAL" and classification in contract_classes:
+        return output.model_copy(update={"decision": "REPLAN"})
+    return output
+
+
 def make_verifier_node(model: RoleModel) -> Node:
     """Create a goal-scoped Verifier with one structured-output repair."""
 
@@ -2993,21 +3021,8 @@ def make_verifier_node(model: RoleModel) -> Node:
                             "satisfy the current goal."
                         ),
                     )
-                if (
-                    structured
-                    and output.decision == "REPLAN"
-                    and not state["current_goal"].get("depends_on")
-                    and output.issue_classification
-                    in {"result", "evidence", "implementation"}
-                ):
-                    output = VerificationOutput(
-                        decision="RETRY_GOAL",
-                        issue_classification="result",
-                        feedback=(
-                            "Correct the current dependency-free goal locally; "
-                            "a plan replacement is not needed. " + output.feedback
-                        ),
-                    )
+                if structured:
+                    output = _normalize_verification_decision(state, output)
                 plan = HighLevelPlan.model_validate(state["high_level_plan"])
                 index = state.get("current_goal_index", 0)
                 has_more = index + 1 < len(plan.goals)
